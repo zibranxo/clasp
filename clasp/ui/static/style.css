@@ -1,0 +1,17 @@
+/*
+ * CLASP web UI — custom styles beyond Tailwind (loaded from CDN in index.html).
+ * Kept minimal per plan.md §15 / §20 step 25. Extended in Sprint 6 alongside
+ * the full 6-panel app (log container scrollbar already included below since
+ * it's a small, self-contained rule with no panel dependency).
+ */
+
+/* Log container scrollbar (used once the Logs panel ships in Sprint 6) */
+#log-container::-webkit-scrollbar { width: 6px; }
+#log-container::-webkit-scrollbar-track { background: transparent; }
+#log-container::-webkit-scrollbar-thumb { background: #374151; border-radius: 3px; }
+
+/* Smooth panel transitions */
+[x-show] { transition: opacity 0.15s ease; }
+
+/* Provider card collapse animation (Alpine x-collapse) */
+[x-collapse] { transition: height 0.2s ease, opacity 0.2s ease; }
