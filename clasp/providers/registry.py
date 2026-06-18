@@ -3,37 +3,41 @@ clasp/providers/registry.py
 ============================
 Provider registry: maps provider names to instantiated ``BaseProvider`` objects.
 
-Sprint 1 responsibilities
---------------------------
+Responsibilities
+-----------------
 - Maintain a dict of ``{provider_name → BaseProvider}`` for all **enabled** providers
   declared in ``config.yaml``.
+- Maintain a dict of ``{provider_name → KeyPool}`` alongside it — one ``KeyPool``
+  per registered provider, built from the catalog ``ProviderProfile`` with any
+  user-config overrides (``rpm_limit``/``tpm_limit``) applied, and the provider's
+  configured API keys (or a single placeholder key for local providers that need
+  none). This is what gives ``router/selector.py`` real rate-limit-aware key
+  selection rather than a stub.
 - Expose a module-level singleton (``_registry``) that is built once at startup via
   :func:`build_registry` and then read by :func:`get` / :func:`get_key_pool` /
   :func:`all_enabled`.
-- Expose ``get_key_pool(name)`` as a **stub** that always returns ``None`` for Sprint 1.
-  Sprint 2 (step 38) replaces this with real ``KeyPool`` instantiation.
 
 Registry class
 --------------
 ``ProviderRegistry``
     Built by :func:`build_registry`.  Holds:
     - ``_providers: dict[str, BaseProvider]`` — live instances.
-    - ``_key_pools: dict[str, Any]`` — filled in Sprint 2; empty for now.
+    - ``_key_pools: dict[str, KeyPool]`` — one per registered provider.
 
 Module-level helpers
 ---------------------
 ``build_registry(settings)``
     Iterate ``settings.provider_chain``.  For each provider name that is enabled
-    and has ≥1 key, instantiate the correct transport class and register it.
-    Logs unknown provider names at WARNING level.  Unknown names are skipped
-    (not a fatal error — allows adding new providers to config before code ships).
+    and has ≥1 key, instantiate the correct transport class, build its ``KeyPool``,
+    and register both.  Logs unknown provider names at WARNING level.  Unknown
+    names are skipped (not a fatal error — allows adding new providers to config
+    before code ships).
 
 ``get(name) → BaseProvider | None``
     Return the registered provider, or ``None`` if unknown/disabled.
 
-``get_key_pool(name) → None``
-    Sprint 1 stub.  Returns ``None`` unconditionally.
-    Sprint 2 replaces: ``return _registry._key_pools.get(name)``.
+``get_key_pool(name) → KeyPool | None``
+    Return the registered ``KeyPool``, or ``None`` if unknown/disabled.
 
 ``all_enabled() → list[str]``
     Names of all registered providers, in registration order.
@@ -48,15 +52,16 @@ Transport class lookup
 to ``(class, extra_kwargs)`` tuples.  All classes receive ``base_url`` from the catalog
 as a keyword argument.
 
-Provider classes for providers not yet implemented in Sprint 1 are mapped to the
-appropriate transport base class using the catalog's ``transport`` field as a fallback.
+Provider classes for providers not yet implemented are mapped to the appropriate
+transport base class using the catalog's ``transport`` field as a fallback.
 
-References: plan.md §9 (step 18), §13 (selector uses registry.get / get_key_pool),
-            CLAUDE.md "Files completed so far".
+References: plan.md §9 (step 18), §12 (Key Pool), §13 (selector uses registry.get /
+            get_key_pool), CLAUDE.md "Files completed so far".
 """
 
 from __future__ import annotations
 
+from dataclasses import replace as _dc_replace
 from typing import TYPE_CHECKING, Any
 
 try:
@@ -81,11 +86,12 @@ except ModuleNotFoundError:  # pragma: no cover
 
     logger = _Shim()  # type: ignore[assignment]
 
-from clasp.config.provider_catalog import PROVIDER_CATALOG
+from clasp.config.provider_catalog import PROVIDER_CATALOG, ProviderProfile
 from clasp.providers.base import BaseProvider
 from clasp.providers.openai_transport import OpenAIChatTransport
 from clasp.providers.anthropic_transport import AnthropicMessagesTransport
 from clasp.providers.nvidia_nim import NvidiaProvider
+from clasp.ratelimit.key_pool import KeyPool
 
 if TYPE_CHECKING:
     from clasp.config.settings import Settings
@@ -142,6 +148,37 @@ def _transport_class(provider_name: str) -> type[BaseProvider]:
     return OpenAIChatTransport
 
 
+def _effective_profile(provider_name: str, provider_cfg: Any) -> ProviderProfile | None:
+    """
+    Merge the catalog ``ProviderProfile`` for *provider_name* with any
+    ``rpm_limit``/``tpm_limit`` overrides set on *provider_cfg`` (plan.md §6:
+    "# Uncomment to override catalog default."). Returns ``None`` if the
+    provider isn't in the catalog at all.
+
+    Only the fields ``KeyPool``/``TokenBucket`` actually consume
+    (``rpm_limit``, ``tpm_limit``, ``rpm_soft_threshold``) are relevant here;
+    the rest of the profile is carried through unchanged. (Capability-flag
+    overrides — ``supports_tools`` etc. — are applied separately, by
+    ``router/capability.py``, not here.)
+    """
+    catalog_profile = PROVIDER_CATALOG.get(provider_name)
+    if catalog_profile is None:
+        return None
+
+    overrides: dict[str, Any] = {}
+    if provider_cfg is not None:
+        if provider_cfg.rpm_limit is not None:
+            overrides["rpm_limit"] = provider_cfg.rpm_limit
+        if provider_cfg.tpm_limit is not None:
+            overrides["tpm_limit"] = provider_cfg.tpm_limit
+        if getattr(provider_cfg, "soft_threshold_pct", None) is not None:
+            overrides["rpm_soft_threshold"] = provider_cfg.soft_threshold_pct / 100.0
+
+    if not overrides:
+        return catalog_profile
+    return _dc_replace(catalog_profile, **overrides)
+
+
 # ---------------------------------------------------------------------------
 # ProviderRegistry
 # ---------------------------------------------------------------------------
@@ -156,26 +193,27 @@ class ProviderRegistry:
         Maps ``provider_name → BaseProvider`` for all successfully instantiated
         enabled providers.
     _key_pools:
-        Sprint 1: always empty.  Sprint 2 populates this with ``KeyPool`` instances.
+        Maps ``provider_name → KeyPool``, one per registered provider.
     _registration_order:
         Preserves the order providers were registered (matches ``provider_chain``).
     """
 
     def __init__(self) -> None:
         self._providers: dict[str, BaseProvider] = {}
-        self._key_pools: dict[str, Any] = {}           # populated in Sprint 2
+        self._key_pools: dict[str, KeyPool] = {}
         self._registration_order: list[str] = []
 
     # ------------------------------------------------------------------
     # Write interface (used only by build_registry / rebuild)
     # ------------------------------------------------------------------
 
-    def _register(self, name: str, instance: BaseProvider) -> None:
+    def _register(self, name: str, instance: BaseProvider, key_pool: KeyPool) -> None:
         self._providers[name] = instance
+        self._key_pools[name] = key_pool
         if name not in self._registration_order:
             self._registration_order.append(name)
         logger.debug("registry: registered provider", provider=name,
-                     cls=type(instance).__name__)
+                     cls=type(instance).__name__, keys=len(key_pool))
 
     def _clear(self) -> None:
         self._providers.clear()
@@ -190,12 +228,8 @@ class ProviderRegistry:
         """Return the provider instance, or ``None`` if not registered."""
         return self._providers.get(name)
 
-    def get_key_pool(self, name: str) -> Any | None:
-        """
-        Return the ``KeyPool`` for *name*, or ``None``.
-
-        Sprint 1: always returns ``None`` — key pools are introduced in Sprint 2.
-        """
+    def get_key_pool(self, name: str) -> KeyPool | None:
+        """Return the ``KeyPool`` for *name*, or ``None`` if not registered."""
         return self._key_pools.get(name)
 
     def all_enabled(self) -> list[str]:
@@ -277,16 +311,30 @@ def build_registry(settings: "Settings") -> ProviderRegistry:
             )
             continue
 
+        effective_profile = _effective_profile(provider_name, provider_cfg)
+        if effective_profile is None:
+            logger.warning(
+                "registry: provider not found in catalog — skipping",
+                provider=provider_name,
+            )
+            continue
+
+        # Local providers need no real key — a single placeholder entry lets
+        # KeyPool's round-robin/bucket machinery apply uniformly rather than
+        # special-casing "no key needed" everywhere downstream.
+        pool_keys = provider_cfg.keys if has_keys else [""]
+
         # Resolve and instantiate the provider class.
         cls = _transport_class(provider_name)
         try:
             # Prefer passing base_url from catalog if the constructor accepts it.
             kwargs: dict[str, Any] = {}
             if catalog_profile is not None:
-                kwargs["base_url"] = catalog_profile.base_url
+                kwargs["base_url"] = provider_cfg.base_url or catalog_profile.base_url
 
             instance = cls(**kwargs)
-            _registry._register(provider_name, instance)
+            key_pool = KeyPool(provider_name, pool_keys, effective_profile)
+            _registry._register(provider_name, instance, key_pool)
         except Exception as exc:  # noqa: BLE001
             logger.error(
                 "registry: failed to instantiate provider — skipping",
@@ -309,13 +357,8 @@ def get(name: str) -> BaseProvider | None:
     return _registry.get(name)
 
 
-def get_key_pool(name: str) -> Any | None:
-    """
-    Return the ``KeyPool`` for *name*.
-
-    Sprint 1 stub — always returns ``None``.
-    Updated in Sprint 2 step 38 to return real ``KeyPool`` objects.
-    """
+def get_key_pool(name: str) -> KeyPool | None:
+    """Return the ``KeyPool`` for *name*, or ``None`` if unknown/disabled."""
     return _registry.get_key_pool(name)
 
 

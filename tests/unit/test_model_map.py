@@ -154,5 +154,58 @@ class TestResolveAlias(unittest.TestCase):
         self.assertIs(resolve, resolve_model)
 
 
+class TestPydanticStyleRoutingCompat(unittest.TestCase):
+    """
+    The real `config/settings.py` uses typed Pydantic models (`ModelRoutes`,
+    `ByTypeRoutes`) for `routing.models`/`routing.by_type`, not plain dicts.
+    `resolve_model()` must work against either shape via `_as_dict()`.
+    """
+
+    class _FakeModelRoutesLikePydantic:
+        """Duck-types a Pydantic BaseModel: has fixed attrs + .model_dump()."""
+
+        def __init__(self, **kwargs):
+            self.__dict__.update(kwargs)
+
+        def model_dump(self):
+            return dict(self.__dict__)
+
+    def test_resolve_model_works_against_model_dump_style_object(self):
+        from clasp.router.model_map import resolve_model
+
+        fake_models = self._FakeModelRoutesLikePydantic(
+            opus="nvidia_nim/moonshotai/kimi-k2-thinking",
+            sonnet="nvidia_nim/nvidia/llama-3.1-nemotron-70b-instruct",
+            haiku="cerebras/llama3.1-8b",
+            fable="gemini/models/gemini-2.5-flash",
+            default="nvidia_nim/nvidia/llama-3.1-nemotron-70b-instruct",
+        )
+        fake_by_type = self._FakeModelRoutesLikePydantic()
+
+        class _FakeRouting:
+            models = fake_models
+            by_type = fake_by_type
+
+        class _FakeSettings:
+            routing = _FakeRouting()
+
+        request = _req(model="claude-opus-4-5-20250929")
+        result = resolve_model(request, "nvidia_nim", _FakeSettings())
+        self.assertEqual(result, "moonshotai/kimi-k2-thinking")
+
+    def test_as_dict_handles_none(self):
+        from clasp.router.model_map import _as_dict
+        self.assertEqual(_as_dict(None), {})
+
+    def test_as_dict_handles_plain_dict(self):
+        from clasp.router.model_map import _as_dict
+        self.assertEqual(_as_dict({"a": "b"}), {"a": "b"})
+
+    def test_as_dict_handles_model_dump_object(self):
+        from clasp.router.model_map import _as_dict
+        fake = self._FakeModelRoutesLikePydantic(x="y")
+        self.assertEqual(_as_dict(fake), {"x": "y"})
+
+
 if __name__ == "__main__":
     unittest.main()

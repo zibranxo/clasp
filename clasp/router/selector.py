@@ -158,7 +158,8 @@ async def select(
     exclude = exclude or set()
 
     # Build candidate order. by_type override goes first, if not excluded.
-    override_value = settings.routing.by_type.get(request.type.value) or ""
+    by_type = model_map._as_dict(getattr(settings.routing, "by_type", None))
+    override_value = by_type.get(request.type.value) or ""
     override_name = override_value.split("/")[0] if override_value else ""
     if override_name and override_name not in exclude:
         candidates = [override_name] + [

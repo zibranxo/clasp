@@ -142,8 +142,19 @@ class ProviderConfig(BaseModel):
     """Per-provider base URL override (used by ollama / lm_studio)."""
     rpm_limit: int | None = None
     """Override catalog default if set."""
+    tpm_limit: int | None = None
+    """Override catalog default if set. `None` means "use the catalog value"
+    (which may itself be `None` = unlimited, e.g. nvidia_nim)."""
     soft_threshold_pct: int | None = None
     """0-100; override catalog rpm_soft_threshold if set."""
+    max_context_tokens: int | None = None
+    """Override catalog default if set. Read by `router/capability.py`."""
+    supports_tools: bool | None = None
+    """Override catalog default if set. Read by `router/capability.py`."""
+    supports_vision: bool | None = None
+    """Override catalog default if set. Read by `router/capability.py`."""
+    supports_thinking: bool | None = None
+    """Override catalog default if set. Read by `router/capability.py`."""
 
 
 class CacheConfig(BaseModel):

@@ -69,6 +69,27 @@ if TYPE_CHECKING:
 _CANONICAL_TIER_ORDER: tuple[str, ...] = ("opus", "sonnet", "haiku", "fable")
 
 
+def _as_dict(value: Any) -> dict[str, str]:
+    """
+    Normalize *value* to a plain ``dict[str, str]``.
+
+    `settings.routing.models` / `settings.routing.by_type` may be a plain
+    dict (as in lightweight/test `Settings` stubs) or a typed Pydantic
+    model with fixed fields like ``ModelRoutes``/``ByTypeRoutes`` (the real
+    `config/settings.py`). Both need to support `.get()` and key iteration
+    here, so a typed model is converted via `.model_dump()` rather than
+    assumed to already behave like a dict.
+    """
+    if value is None:
+        return {}
+    if isinstance(value, dict):
+        return value
+    model_dump = getattr(value, "model_dump", None)
+    if callable(model_dump):
+        return model_dump()
+    return dict(value)
+
+
 def _split_provider_slug(value: str) -> tuple[str, str]:
     """Split a `"provider/model/slug/with/segments"` config string into
     `(provider, slug)`. Only the first `/` is significant — model slugs
@@ -96,8 +117,8 @@ def resolve_model(
 
     See module docstring for the full three-step matching order.
     """
-    routing_models: dict[str, str] = settings.routing.models or {}
-    by_type: dict[str, str] = settings.routing.by_type or {}
+    routing_models: dict[str, str] = _as_dict(getattr(settings.routing, "models", None))
+    by_type: dict[str, str] = _as_dict(getattr(settings.routing, "by_type", None))
 
     # 1. by_type override
     type_key = getattr(request.type, "value", request.type)
