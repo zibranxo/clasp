@@ -38,7 +38,7 @@ NVIDIA_NIM_BASE_URL = "https://integrate.api.nvidia.com/v1"
 DEFAULT_KIMI_THINKING_BUDGET_TOKENS = 8000
 
 
-class NvidiaNIMProvider(OpenAIChatTransport):
+class NvidiaProvider(OpenAIChatTransport):
     def __init__(
         self,
         *,
@@ -114,3 +114,7 @@ class NvidiaNIMProvider(OpenAIChatTransport):
         budget_tokens = thinking_cfg.get("budget_tokens", self.kimi_thinking_budget_tokens)
         payload["extra_body"] = {"thinking": {"type": "enabled", "budget_tokens": budget_tokens}}
         return payload
+
+
+# Export the class for external use
+__all__ = ["NvidiaProvider"]

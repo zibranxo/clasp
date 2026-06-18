@@ -1,188 +1,217 @@
 """
-Priority-ordered request queue + drain coroutine for CLASP's 429-absorption
-layer.
+clasp/queue/manager.py
+Priority queue for requests that can't be dispatched immediately.
 
-plan.md §11 "Phase 3 — 429 Absorber + Priority Queue", "Priority Queue Drain
-(queue/manager.py)".
+Priority levels:
+  0 = INTERACTIVE  — user is waiting; highest priority
+  1 = TOOL_USE     — tool call mid-session
+  2 = BACKGROUND   — file indexing, summarization
 
-Priority levels (lower int = served first; under provider pressure,
-interactive requests always win):
-    0 = INTERACTIVE  — user typed something, wants it now
-    1 = TOOL_USE     — tool call mid-session
-    2 = BACKGROUND   — file indexing, summarization, etc.
+The drain_task() coroutine runs as a background asyncio task (started by
+server.py at startup). It retries selector.select() every 1 s until a
+provider becomes available, then dispatches and resolves the Future.
 
-queue/absorber.py (Sprint 3 step 48 — not built in this pass) is the producer:
-on a 429 with no immediate failover available, it builds a QueuedRequest and
-calls RequestQueue.enqueue(). drain_task() is the consumer: a single
-long-running background coroutine (started from server.py's startup hook,
-step 50 — not wired in this pass) that pulls the highest-priority item and
-repeatedly asks the provider selector for capacity until either a provider
-frees up or the request has waited past max_wait_seconds.
-
-Integration note: router/selector.py (plan.md §13, Sprint 5) doesn't exist
-yet. RequestQueue takes a `selector` object via constructor injection — at
-real call sites this will be `clasp.router.selector` (the module itself,
-since it exposes an async `select()` function matching this shape:
-`async def select(request, exclude=None) -> tuple[BaseProvider, str, int] | None`)
-— rather than importing it at module level, so this file doesn't hard-fail
-on import before selector.py exists, and so tests can substitute a mock.
+No external dependencies — pure asyncio + heapq.
 """
 
 from __future__ import annotations
 
 import asyncio
-import itertools
+import heapq
 import time
 from dataclasses import dataclass, field
-from enum import IntEnum
-from typing import Any, Protocol
+from typing import Any, Awaitable, Callable, Optional
 
-from loguru import logger
+from clasp.queue.sse_hold import _error_event
 
 
-class Priority(IntEnum):
-    INTERACTIVE = 0
-    TOOL_USE = 1
-    BACKGROUND = 2
+# ---------------------------------------------------------------------------
+# Types
+# ---------------------------------------------------------------------------
+
+@dataclass(order=False)
+class QueuedRequest:
+    """
+    A request waiting for a provider slot.
+
+    Ordering is by (priority, enqueued_at) so that lower priority numbers
+    and earlier arrival times both favour dispatch.
+    """
+
+    request: Any               # AnthropicRequest or dict (Sprint 1 compat)
+    future: asyncio.Future     # resolved with list[bytes] on success
+    priority: int = 0          # 0=INTERACTIVE, 1=TOOL_USE, 2=BACKGROUND
+    enqueued_at: float = field(default_factory=time.monotonic)
+
+    # Comparison operators for heapq (min-heap — smallest first)
+    def __lt__(self, other: "QueuedRequest") -> bool:
+        return (self.priority, self.enqueued_at) < (other.priority, other.enqueued_at)
+
+    def __le__(self, other: "QueuedRequest") -> bool:
+        return (self.priority, self.enqueued_at) <= (other.priority, other.enqueued_at)
 
 
 class QueueTimeoutError(Exception):
-    """Set as the result of a QueuedRequest's future when it waited longer
-    than max_wait_seconds without any provider ever freeing up capacity."""
+    """Raised when a queued request exceeds max_wait_seconds."""
+
+    def __str__(self) -> str:
+        return "All providers rate-limited. Try again shortly."
 
 
-class QueueFullError(Exception):
-    """Raised by enqueue() when the queue is already at max_queue_depth.
+# ---------------------------------------------------------------------------
+# Selector type alias (injected; avoids circular import)
+# ---------------------------------------------------------------------------
 
-    Not present in plan.md's literal code sample, but max_queue_depth IS part
-    of the documented config schema (plan.md §6, server.max_queue_depth) —
-    accepting unlimited requests with no bound on a documented limit would be
-    the gap, not this check.
+# Signature: async (request, exclude=None) → (provider, key, key_idx) | None
+SelectorFn = Callable[..., Awaitable[Optional[tuple[Any, str, int]]]]
+
+
+# ---------------------------------------------------------------------------
+# Queue Manager
+# ---------------------------------------------------------------------------
+
+class QueueManager:
     """
+    Priority queue + background drain task.
 
-
-class Selector(Protocol):
-    async def select(
-        self, request: Any, exclude: set[str] | None = None
-    ) -> tuple[Any, str, int] | None: ...
-
-
-@dataclass
-class QueuedRequest:
-    """One request waiting for provider capacity.
-
-    `request` is duck-typed (the real AnthropicRequest type lives in a module
-    not visible in this session) — RequestQueue itself only ever reads
-    `.priority` off of it directly; everything else about `request` is opaque
-    and passed straight through to `selector.select()` / `provider.stream()`.
-    """
-
-    request: Any
-    future: asyncio.Future
-    priority: int
-    enqueued_at: float = field(default_factory=time.monotonic)
-
-
-class RequestQueue:
-    """Wraps asyncio.PriorityQueue so queued requests are dispatched in
-    priority order (INTERACTIVE first), not arrival order, and drained by a
-    single background task that retries the selector until capacity exists
-    or the request times out.
+    Parameters
+    ----------
+    selector_fn:
+        Async callable matching the signature of ``router.selector.select``.
+        Injected to avoid circular imports and to simplify testing.
+    max_wait_seconds:
+        How long a queued request may wait before timing out.
+    drain_poll_interval:
+        How often the drain task polls for an available provider (seconds).
+        Default 1 s; reduced in tests for speed.
     """
 
     def __init__(
         self,
-        *,
-        selector: Selector,
-        max_wait_seconds: int = 180,
-        max_queue_depth: int = 50,
-        poll_interval: float = 1.0,
+        selector_fn: SelectorFn,
+        max_wait_seconds: float = 120.0,
+        drain_poll_interval: float = 1.0,
     ) -> None:
-        self._q: asyncio.PriorityQueue[tuple[int, int, QueuedRequest]] = (
-            asyncio.PriorityQueue()
-        )
-        # Tie-breaker for asyncio.PriorityQueue: QueuedRequest objects aren't
-        # orderable, so two same-priority items with no distinct second tuple
-        # element would raise TypeError on comparison. itertools.count() gives
-        # a strictly increasing, guaranteed-unique sequence number — safer
-        # than e.g. time.monotonic(), which *could* collide at high enough
-        # enqueue rates on a fast clock.
-        self._counter = itertools.count()
-        self._selector = selector
+        self._selector_fn = selector_fn
         self.max_wait_seconds = max_wait_seconds
-        self.max_queue_depth = max_queue_depth
-        # Parameterized rather than the spec's hardcoded `await asyncio.sleep(1)`
-        # so tests can drive the retry loop quickly. Same algorithm, just a
-        # configurable constant — production code gets the spec's default of 1s.
-        self.poll_interval = poll_interval
+        self._drain_poll_interval = drain_poll_interval
 
-    def qsize(self) -> int:
-        return self._q.qsize()
+        # Heap invariant maintained by heapq — protected by asyncio.Lock.
+        self._heap: list[QueuedRequest] = []
+        self._lock = asyncio.Lock()
+        self._not_empty = asyncio.Event()
 
-    async def enqueue(self, queued: QueuedRequest) -> None:
-        if self._q.qsize() >= self.max_queue_depth:
-            raise QueueFullError(
-                f"Queue is at capacity ({self.max_queue_depth}); rejecting new request."
-            )
-        seq = next(self._counter)
-        await self._q.put((queued.priority, seq, queued))
-        logger.debug(
-            "Enqueued request priority={} (queue depth now {})",
-            queued.priority,
-            self._q.qsize(),
-        )
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+
+    async def enqueue(self, req: QueuedRequest) -> None:
+        """Add a request to the priority queue."""
+        async with self._lock:
+            heapq.heappush(self._heap, req)
+            self._not_empty.set()
 
     async def drain_task(self) -> None:
-        """Background coroutine. Runs forever. Dispatches queued requests as
-        providers recover. Intended to be started once via
-        `asyncio.create_task(queue.drain_task())` from server.py's startup
-        hook and cancelled on shutdown.
+        """
+        Background coroutine — runs forever.
+        Dispatches queued requests as provider slots become available.
         """
         while True:
             try:
-                await self._drain_one()
+                # Wait until the queue is non-empty.
+                await self._not_empty.wait()
+
+                # Peek at the highest-priority item without popping.
+                async with self._lock:
+                    if not self._heap:
+                        self._not_empty.clear()
+                        continue
+                    req = self._heap[0]
+
+                # Try to find a provider.
+                selection = await self._selector_fn(req.request)
+
+                if selection is None:
+                    # Check overall timeout.
+                    if time.monotonic() - req.enqueued_at > self.max_wait_seconds:
+                        async with self._lock:
+                            if self._heap and self._heap[0] is req:
+                                heapq.heappop(self._heap)
+                                if not self._heap:
+                                    self._not_empty.clear()
+                        if not req.future.done():
+                            req.future.set_exception(QueueTimeoutError())
+                    else:
+                        # No provider yet — wait and retry.
+                        await asyncio.sleep(self._drain_poll_interval)
+                    continue
+
+                # We have a selection — pop from queue and dispatch.
+                async with self._lock:
+                    if self._heap and self._heap[0] is req:
+                        heapq.heappop(self._heap)
+                    if not self._heap:
+                        self._not_empty.clear()
+
+                provider, key, key_idx = selection
+                await self._dispatch(req, provider, key, key_idx)
+
             except asyncio.CancelledError:
-                raise
-            except Exception as e:  # noqa: BLE001 — must never kill the drain loop
-                logger.error("drain_task error: {}", e)
+                return
+            except Exception as exc:
+                # Log but keep running.
+                try:
+                    from loguru import logger  # type: ignore[import]
+                    logger.error("drain_task error", exc=str(exc))
+                except ImportError:
+                    import traceback
+                    traceback.print_exc()
                 await asyncio.sleep(1)
 
-    async def _drain_one(self) -> None:
-        """Pull exactly one item off the queue and dispatch-or-timeout it.
-
-        Split out from drain_task() so each cycle is independently testable
-        without needing to manage the infinite outer loop. Behavior is
-        identical to plan.md's single-function version; this just replaces
-        the while/else control flow with an explicit `timed_out` flag for
-        readability — same algorithm, same outcomes.
-        """
-        _priority, _seq, req = await self._q.get()
-
-        selection = None
-        timed_out = False
-        while selection is None and not timed_out:
-            selection = await self._selector.select(req.request)
-            if selection is None:
-                if time.monotonic() - req.enqueued_at > self.max_wait_seconds:
-                    if not req.future.done():
-                        req.future.set_exception(QueueTimeoutError())
-                    timed_out = True
-                else:
-                    await asyncio.sleep(self.poll_interval)
-
-        if timed_out:
-            self._q.task_done()
+    async def _dispatch(
+        self,
+        req: QueuedRequest,
+        provider: Any,
+        key: str,
+        key_idx: int,
+    ) -> None:
+        """Stream from provider and resolve the future with collected chunks."""
+        if req.future.done():
             return
-
-        provider, key, key_idx = selection
-        chunks = []
+        chunks: list[bytes] = []
         try:
             async for chunk in provider.stream(req.request, key=key, key_index=key_idx):
-                chunks.append(chunk)
+                chunks.append(chunk if isinstance(chunk, bytes) else chunk.encode())
+            req.future.set_result(chunks)
+        except Exception as exc:
             if not req.future.done():
-                req.future.set_result(chunks)
-        except Exception as e:
-            if not req.future.done():
-                req.future.set_exception(e)
-        finally:
-            self._q.task_done()
+                req.future.set_exception(exc)
+
+    @property
+    def depth(self) -> int:
+        return len(self._heap)
+
+
+# ---------------------------------------------------------------------------
+# Module-level singleton (created lazily by absorber / server)
+# ---------------------------------------------------------------------------
+
+_queue_manager: Optional[QueueManager] = None
+
+
+def init_queue_manager(
+    selector_fn: SelectorFn,
+    max_wait_seconds: float = 120.0,
+    drain_poll_interval: float = 1.0,
+) -> QueueManager:
+    global _queue_manager
+    _queue_manager = QueueManager(
+        selector_fn=selector_fn,
+        max_wait_seconds=max_wait_seconds,
+        drain_poll_interval=drain_poll_interval,
+    )
+    return _queue_manager
+
+
+def get_queue_manager() -> Optional[QueueManager]:
+    return _queue_manager

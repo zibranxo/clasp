@@ -309,7 +309,7 @@ def handle_probe(
     path:
         HTTP request path.
     body:
-        Parsed JSON body.  May be ``{}`` for GET requests.
+        Parsed JSON body.  May be empty ``{}`` for GET requests.
     request_id:
         Optional request ID to embed in canned SSE responses (for log correlation).
     """
@@ -349,3 +349,37 @@ def get_model_list() -> dict[str, Any]:
 def count_tokens_local(body: dict[str, Any]) -> int:
     """Return a local token estimate for *body*. Convenience wrapper."""
     return _estimate_tokens(body)
+
+
+# Export constants for use in other modules
+__all__ = [
+    "STATIC_MODEL_LIST",
+    "TRIVIAL_PROBE_MAX_TOKENS",
+    "TRIVIAL_PROBE_MAX_CHARS",
+    "is_probe",
+    "handle_probe",
+    "ProbeResult",
+    "get_model_list",
+    "count_tokens_local",
+    "COUNT_TOKENS_ENDPOINT",
+    "MODELS_ENDPOINT",
+    "answer_count_tokens",
+    "answer_models",
+    "is_local_probe",
+]
+
+# Define the constants that proxy_routes.py expects
+COUNT_TOKENS_ENDPOINT = "/v1/messages/count_tokens"
+MODELS_ENDPOINT = "/v1/models"
+
+def answer_count_tokens(body: dict[str, Any]) -> dict:
+    """Answer count_tokens request locally."""
+    return handle_probe("/v1/messages/count_tokens", body).payload
+
+def answer_models() -> dict:
+    """Answer models request locally."""
+    return handle_probe("/v1/models", {}).payload
+
+def is_local_probe(body: dict[str, Any]) -> bool:
+    """Check if body represents a local probe (for /v1/messages endpoint)."""
+    return _is_trivial_probe(body)

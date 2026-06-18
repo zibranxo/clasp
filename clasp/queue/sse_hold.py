@@ -1,15 +1,17 @@
 """
-SSE hold-open generator for CLASP's 429-absorption layer.
+clasp/queue/sse_hold.py
+SSE hold-open: emit keep-alive comments until a Future resolves, then
+forward the buffered response chunks.
 
-plan.md §11 "Phase 3 — 429 Absorber + Priority Queue", "SSE Hold-Open (queue/sse_hold.py)".
+Protocol detail:
+  - Keep-alive lines are SSE comment lines (": ...\\n\\n") which Anthropic's
+    client ignores but which prevent proxy timeout / connection drops.
+  - On timeout: yield an Anthropic ``error`` event so Claude Code can surface
+    a useful message rather than a silent hang.
+  - On future exception: yield an Anthropic ``error`` event.
+  - On future result (list[bytes]): yield each chunk as-is (already Anthropic SSE).
 
-hold_until_resolved() is consumed by queue/absorber.py (Sprint 3 step 48 — not
-built in this pass) when no provider has immediate capacity for a request: the
-request is enqueued, and this generator keeps the client's SSE connection alive
-with `": keep-alive\\n\\n"` comments while the queue's drain_task() works on
-finding capacity, until the request's Future resolves (success), errors, or the
-overall wait exceeds max_wait seconds (timeout — yields an error event instead
-of letting the connection silently die).
+No external dependencies — pure asyncio.
 """
 
 from __future__ import annotations
@@ -17,51 +19,80 @@ from __future__ import annotations
 import asyncio
 import json
 import time
-from collections.abc import AsyncGenerator
+from typing import AsyncGenerator
 
-KEEP_ALIVE_INTERVAL_SECONDS = 15
+# Default keep-alive interval. Override per-call for tests.
+DEFAULT_KEEPALIVE_INTERVAL = 15.0
 
 
 async def hold_until_resolved(
     future: asyncio.Future,
-    max_wait: int,
+    max_wait_seconds: float,
     *,
-    keep_alive_interval: float = KEEP_ALIVE_INTERVAL_SECONDS,
-) -> AsyncGenerator[str, None]:
-    """Yield SSE keep-alive comments every `keep_alive_interval` seconds while
-    `future` is pending, then yield the resolved result (or an error event).
+    keepalive_interval: float = DEFAULT_KEEPALIVE_INTERVAL,
+) -> AsyncGenerator[bytes, None]:
+    """
+    Async generator that holds an SSE connection open until *future* is done.
 
-    `keep_alive_interval` is parameterized (defaulting to the spec's 15s) so
-    tests can exercise the keep-alive cadence without waiting 15 real seconds
-    per tick — the algorithm itself is unchanged from plan.md.
-
-    asyncio.shield() is essential here: without it, asyncio.wait_for()'s
-    timeout would cancel `future` itself on each 15s tick, destroying state
-    other code (queue/manager.py's drain_task) is still working to resolve.
-    Shielding lets wait_for() time out and retry-wait on the *same* future
-    indefinitely, while only ever cancelling its own internal wrapper task.
+    Yields
+    ------
+    bytes
+        SSE-formatted bytes:
+          - Keep-alive comment lines (": keep-alive elapsed=Ns\\n\\n") every
+            *keepalive_interval* seconds.
+          - Response chunks (list[bytes]) from ``future.result()`` on success.
+          - An Anthropic ``error`` event on timeout or exception.
     """
     start = time.monotonic()
+
     while not future.done():
+        wait_left = max(0.0, max_wait_seconds - (time.monotonic() - start))
+        if wait_left <= 0:
+            # Timeout exceeded — yield error and return.
+            yield _error_event("All providers rate-limited. Try again shortly.")
+            future.cancel()
+            return
+
+        # Wait up to keepalive_interval for the future to resolve.
         try:
-            await asyncio.wait_for(asyncio.shield(future), timeout=keep_alive_interval)
+            await asyncio.wait_for(
+                asyncio.shield(future),
+                timeout=min(keepalive_interval, wait_left),
+            )
         except asyncio.TimeoutError:
             elapsed = int(time.monotonic() - start)
-            yield f": keep-alive elapsed={elapsed}s\n\n"
-            if time.monotonic() - start > max_wait:
+            # Check overall timeout AFTER emitting keep-alive (so at least
+            # one keep-alive is visible before the error event).
+            if time.monotonic() - start >= max_wait_seconds:
                 yield _error_event("All providers rate-limited. Try again shortly.")
+                future.cancel()
                 return
+            yield f": keep-alive elapsed={elapsed}s\n\n".encode()
+        except asyncio.CancelledError:
+            return
 
-    if future.exception():
-        yield _error_event(str(future.exception()))
+    # Future is done — check result.
+    if future.cancelled():
         return
 
-    for chunk in future.result():
+    exc = future.exception()
+    if exc is not None:
+        yield _error_event(str(exc))
+        return
+
+    # Success — forward the buffered chunks.
+    chunks: list[bytes] = future.result()
+    for chunk in chunks:
         yield chunk
 
 
-def _error_event(msg: str) -> str:
-    payload = json.dumps(
-        {"type": "error", "error": {"type": "overloaded_error", "message": msg}}
-    )
-    return f"event: error\ndata: {payload}\n\n"
+def _error_event(message: str) -> bytes:
+    """Build an Anthropic SSE error event."""
+    payload = json.dumps({
+        "type": "error",
+        "error": {
+            "type": "overloaded_error",
+            "message": message,
+        },
+    })
+    return f"event: error\ndata: {payload}\n\n".encode()

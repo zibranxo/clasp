@@ -1,192 +1,113 @@
 """
 clasp/api/service.py
 
-Minimal Sprint-1 orchestration layer.
+Merged orchestration layer for ``/v1/messages``.
 
-Responsibility
---------------
-Sits between ``proxy_routes.py`` (FastAPI request/response) and the provider
-layer.  For Sprint 1 the pipeline is deliberately thin:
+Keeps Version 1 as the core pipeline:
+    trivial probe short-circuit → detect/classify → build AnthropicRequest
+    → selector-based provider routing → streamed SSE output
 
-    detect(body)  →  pick first enabled provider  →  provider.stream()
-
-Later sprints will slot in:
-  - Sprint 2: full selector (rate-limit checks, capability filtering)
-  - Sprint 3: 429 absorber + priority queue
-  - Sprint 5: optimizer + cache read/write
-
-The function signatures are stable; callers won't need to change.
-
-Public API
-----------
-    from clasp.api.service import handle_request
-
-    # Non-streaming: returns the complete Anthropic response dict.
-    response = await handle_request(body, request_id="req_abc123", stream=False)
-
-    # Streaming: yields raw SSE lines (already in Anthropic format).
-    async for line in handle_request(body, request_id="req_abc123", stream=True):
-        yield line
+Backports Version 2’s missing behavior:
+    - stream=False support
+    - provider.complete(...) non-streaming path
+    - unified logging / latency tracking for both modes
+    - request-id helper
+    - structured error handling for both stream and non-stream
 """
 
 from __future__ import annotations
 
+import json
 import time
 import uuid
 from collections.abc import AsyncIterator
 from typing import Any
 
-from loguru import logger
+try:
+    from loguru import logger
+except ModuleNotFoundError:  # pragma: no cover — shim for test environments
+    import logging as _logging
 
-from clasp.api.detect import RequestType, classify_priority, detect
-from clasp.config.settings import get_settings
+    class _Shim:
+        _log = _logging.getLogger("clasp.service")
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
+        def info(self, msg: str, **kw: Any) -> None:
+            self._log.info(msg + ("  " + str(kw) if kw else ""))
+
+        def warning(self, msg: str, **kw: Any) -> None:
+            self._log.warning(msg + ("  " + str(kw) if kw else ""))
+
+        def debug(self, msg: str, **kw: Any) -> None:
+            self._log.debug(msg + ("  " + str(kw) if kw else ""))
+
+        def error(self, msg: str, **kw: Any) -> None:
+            self._log.error(msg + ("  " + str(kw) if kw else ""))
+
+    logger = _Shim()  # type: ignore[assignment]
+
+from clasp.api import optimize
+from clasp.api.detect import detect, needs_tools, needs_vision, priority_for
+from clasp.providers.common.error_mapper import ErrorType, build_anthropic_error
+from clasp.providers.common.token_counter import estimate_request_tokens
+from clasp.router import selector
 
 
 def _make_request_id() -> str:
-    """Generate a ``req_<uuid4>`` request identifier."""
+    """Generate a stable ``req_<uuid4>`` request identifier."""
     return f"req_{uuid.uuid4().hex}"
 
 
-def _get_registry():
-    """
-    Lazy import of the provider registry to avoid circular imports at module
-    load time (registry imports settings, settings is already loaded here).
-    """
-    from clasp.providers.registry import get_registry  # noqa: PLC0415
-
-    return get_registry()
+def _provider_name(provider: Any) -> str:
+    """Best-effort provider label for logs."""
+    return getattr(provider, "name", getattr(provider, "provider_name", type(provider).__name__))
 
 
-# ---------------------------------------------------------------------------
-# No-provider error response builders
-# ---------------------------------------------------------------------------
-
-def _no_provider_error_json(request_id: str) -> dict[str, Any]:
-    """Anthropic-format error response when no provider is available."""
-    return {
-        "type": "error",
-        "error": {
-            "type": "overloaded_error",
-            "message": (
-                "No providers are currently available. "
-                "All configured providers are either disabled, cooling down, "
-                "or no API keys have been added. "
-                "Check the CLASP web UI at http://127.0.0.1:8082 to add keys."
-            ),
-        },
-    }
-
-
-def _no_provider_error_sse(request_id: str) -> str:
-    """SSE-formatted error event for the no-provider case."""
-    import json  # noqa: PLC0415
-
-    payload = json.dumps(_no_provider_error_json(request_id))
-    return f"event: error\ndata: {payload}\n\n"
-
-
-# ---------------------------------------------------------------------------
-# Core service function
-# ---------------------------------------------------------------------------
-
-async def handle_request(
+def build_anthropic_request(
     body: dict[str, Any],
-    *,
     request_id: str | None = None,
-    stream: bool | None = None,
-) -> dict[str, Any] | AsyncIterator[str]:
+) -> selector.AnthropicRequest:
     """
-    Orchestrate a single ``POST /v1/messages`` request.
-
-    Parameters
-    ----------
-    body:
-        Validated Anthropic Messages API request dict.
-    request_id:
-        Optional pre-generated request ID.  A new one is minted if omitted.
-    stream:
-        Whether to stream.  Falls back to ``body["stream"]`` if ``None``.
-
-    Returns
-    -------
-    For non-streaming:  ``dict`` — complete Anthropic response.
-    For streaming:      ``AsyncIterator[str]`` — SSE lines in Anthropic format.
+    Classify and pre-flight-estimate *body* into a ready-to-route
+    ``AnthropicRequest`` — the object ``router/selector.py`` consumes.
     """
-    if request_id is None:
-        request_id = _make_request_id()
-
-    if stream is None:
-        stream = bool(body.get("stream", False))
-
-    # ── Classify ────────────────────────────────────────────────────────────
-    req_type: RequestType = detect(body)
-    priority: int = classify_priority(req_type)
-
-    logger.info(
-        "request",
+    request_type = detect(body)
+    estimated = estimate_request_tokens(body)
+    return selector.AnthropicRequest(
+        type=request_type,
+        model=body.get("model", ""),
+        body=body,
+        needs_tools=needs_tools(body),
+        needs_vision=needs_vision(body),
+        estimated_tokens=estimated,
+        priority=priority_for(request_type),
         request_id=request_id,
-        type=req_type.value,
-        priority=priority,
-        model=body.get("model", "unknown"),
-        stream=stream,
     )
 
-    # ── Select provider (Sprint 1: first enabled) ───────────────────────────
-    registry = _get_registry()
-    provider = registry.first_available()
 
-    if provider is None:
-        logger.warning("no provider available", request_id=request_id)
-        if stream:
-            return _stream_no_provider_error(request_id)
-        return _no_provider_error_json(request_id)
-
-    logger.info(
-        "provider selected",
-        request_id=request_id,
-        provider=provider.provider_name,
-    )
-
-    # ── Dispatch ────────────────────────────────────────────────────────────
-    t0 = time.monotonic()
-
-    if stream:
-        return _stream_with_logging(
-            provider=provider,
-            body=body,
-            request_id=request_id,
-            req_type=req_type,
-            t0=t0,
-        )
-    else:
-        return await _non_stream_with_logging(
-            provider=provider,
-            body=body,
-            request_id=request_id,
-            req_type=req_type,
-            t0=t0,
-        )
+def _error_sse(error_type: ErrorType, message: str) -> str:
+    """One Anthropic-format ``event: error`` SSE block."""
+    payload = build_anthropic_error(error_type, message)
+    return f"event: error\ndata: {json.dumps(payload)}\n\n"
 
 
-# ---------------------------------------------------------------------------
-# Streaming wrapper
-# ---------------------------------------------------------------------------
+def _no_provider_error_json(message: str) -> dict[str, Any]:
+    """Anthropic-format JSON error response for non-streaming no-provider cases."""
+    return build_anthropic_error(ErrorType.OVERLOADED, message)
 
-async def _stream_no_provider_error(request_id: str) -> AsyncIterator[str]:
+
+async def _stream_no_provider_error(error_type: ErrorType, message: str) -> AsyncIterator[str]:
     """Yield a single SSE error event and stop."""
-    yield _no_provider_error_sse(request_id)
+    yield _error_sse(error_type, message)
 
 
 async def _stream_with_logging(
     *,
     provider: Any,
+    api_key: str,
+    key_index: int,
     body: dict[str, Any],
     request_id: str,
-    req_type: RequestType,
+    request_type: str,
     t0: float,
 ) -> AsyncIterator[str]:
     """
@@ -195,75 +116,165 @@ async def _stream_with_logging(
     """
     outcome = "ok"
     try:
-        async for chunk in provider.stream(body):
+        async for chunk in provider.stream(body, api_key, key_index):
             yield chunk
     except Exception as exc:  # noqa: BLE001
         outcome = f"error:{type(exc).__name__}"
         logger.error(
-            "stream error",
+            "service: provider stream failed",
             request_id=request_id,
-            provider=provider.provider_name,
+            provider=_provider_name(provider),
+            key_index=key_index,
             error=str(exc),
         )
-        import json  # noqa: PLC0415
-
-        error_payload = json.dumps(
-            {
-                "type": "error",
-                "error": {
-                    "type": "api_error",
-                    "message": f"Provider error: {exc}",
-                },
-            }
-        )
-        yield f"event: error\ndata: {error_payload}\n\n"
+        yield _error_sse(ErrorType.SERVER_ERROR, f"Upstream provider error: {exc}")
     finally:
-        latency_ms = int((time.monotonic() - t0) * 1000)
         logger.info(
-            "request_complete",
+            "service: request complete",
             request_id=request_id,
-            type=req_type.value,
-            provider=provider.provider_name,
-            latency_ms=latency_ms,
+            provider=_provider_name(provider),
+            key_index=key_index,
+            latency_s=round(time.monotonic() - t0, 3),
             stream=True,
             outcome=outcome,
+            type=request_type,
         )
 
-
-# ---------------------------------------------------------------------------
-# Non-streaming wrapper
-# ---------------------------------------------------------------------------
 
 async def _non_stream_with_logging(
     *,
     provider: Any,
+    api_key: str,
+    key_index: int,
     body: dict[str, Any],
     request_id: str,
-    req_type: RequestType,
+    request_type: str,
     t0: float,
 ) -> dict[str, Any]:
-    """Call ``provider.complete()`` and log the result."""
+    """
+    Call ``provider.complete()`` and log the result.
+    """
     outcome = "ok"
     try:
-        response = await provider.complete(body)
+        response = await provider.complete(body, api_key, key_index)
         return response
     except Exception as exc:  # noqa: BLE001
         outcome = f"error:{type(exc).__name__}"
         logger.error(
-            "complete error",
+            "service: provider complete failed",
             request_id=request_id,
-            provider=provider.provider_name,
+            provider=_provider_name(provider),
+            key_index=key_index,
             error=str(exc),
         )
-        return _no_provider_error_json(request_id)
+        return _no_provider_error_json(f"Upstream provider error: {exc}")
     finally:
-        latency_ms = int((time.monotonic() - t0) * 1000)
         logger.info(
-            "request_complete",
+            "service: request complete",
             request_id=request_id,
-            type=req_type.value,
-            provider=provider.provider_name,
-            latency_ms=latency_ms,
+            provider=_provider_name(provider),
+            key_index=key_index,
+            latency_s=round(time.monotonic() - t0, 3),
             stream=False,
             outcome=outcome,
+            type=request_type,
         )
+
+
+async def handle_request(
+    body: dict[str, Any],
+    *,
+    request_id: str | None = None,
+    stream: bool | None = None,
+) -> dict[str, Any] | AsyncIterator[str]:
+    """
+    Run the full ``/v1/messages`` pipeline for one request.
+
+    Returns:
+        - non-streaming: Anthropic JSON dict
+        - streaming: async iterator yielding SSE strings
+    """
+    request_id = request_id or _make_request_id()
+    if stream is None:
+        stream = bool(body.get("stream", False))
+
+    # Trivial-probe short-circuit (max_tokens<=5, tiny body) — answered
+    # locally with a canned response, no provider call at all.
+    if optimize.is_probe("/v1/messages", body):
+        result = optimize.handle_probe("/v1/messages", body, request_id=request_id)
+        logger.debug("service: trivial probe answered locally", request_id=request_id)
+
+        if stream:
+            async def _probe_stream() -> AsyncIterator[str]:
+                for line in result.payload:
+                    yield line
+
+            return _probe_stream()
+
+        # Best-effort non-streaming fallback for probe requests.
+        # If the probe helper already produced a JSON-like object, return it.
+        # Otherwise, preserve the payload locally rather than routing upstream.
+        if hasattr(result, "response") and isinstance(result.response, dict):
+            return result.response
+        return {
+            "type": "message",
+            "id": request_id,
+            "role": "assistant",
+            "content": [
+                {
+                    "type": "text",
+                    "text": "\n".join(getattr(result, "payload", [])),
+                }
+            ],
+        }
+
+    request = build_anthropic_request(body, request_id=request_id)
+    logger.info(
+        "service: request classified",
+        request_id=request_id,
+        type=request.type.value,
+        estimated_tokens=request.estimated_tokens,
+        needs_tools=request.needs_tools,
+        needs_vision=request.needs_vision,
+        priority=request.priority,
+        stream=stream,
+    )
+
+    selection = await selector.select(request)
+    if selection is None:
+        logger.warning(
+            "service: no provider available — failing fast (no queue/absorber yet)",
+            request_id=request_id,
+            type=request.type.value,
+        )
+        message = (
+            "All configured providers are currently rate-limited or unavailable. "
+            "Please retry shortly."
+        )
+        if stream:
+            return _stream_no_provider_error(ErrorType.OVERLOADED, message)
+        return _no_provider_error_json(message)
+
+    provider, api_key, key_index = selection
+    start = time.monotonic()
+
+    if not stream:
+        return await _non_stream_with_logging(
+            provider=provider,
+            api_key=api_key,
+            key_index=key_index,
+            body=request.body,
+            request_id=request_id,
+            request_type=request.type.value,
+            t0=start,
+        )
+
+    return _stream_with_logging(
+        provider=provider,
+        api_key=api_key,
+        key_index=key_index,
+        body=request.body,
+        request_id=request_id,
+        request_type=request.type.value,
+        t0=start,
+    )

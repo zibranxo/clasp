@@ -1,31 +1,7 @@
 """
 clasp/api/proxy_routes.py
-
+=========================
 FastAPI router that exposes the Anthropic Messages API surface to Claude Code.
-
-Endpoints
----------
-  POST /v1/messages                — main proxy (stream or JSON)
-  POST /v1/messages/count_tokens   — local tiktoken estimate, no provider call
-  GET  /v1/models                  — static model list, no provider call
-  GET  /health                     — liveness probe (no auth)
-
-Auth
-----
-Every endpoint except ``GET /health`` validates an ``Authorization: Bearer <key>``
-header against ``settings.server.api_key``.  A missing or wrong token yields
-``401 Unauthorized`` with an Anthropic-shaped error body.
-
-Streaming
----------
-When ``body["stream"] == True`` the response is a ``StreamingResponse`` with
-``Content-Type: text/event-stream``.  The generator from ``service.handle_request``
-yields pre-formatted SSE lines; we pass them through verbatim.
-
-Non-streaming
--------------
-``service.handle_request`` returns the complete response dict which is returned
-as a plain ``JSONResponse``.
 """
 
 from __future__ import annotations
@@ -147,7 +123,7 @@ async def count_tokens(request: Request) -> JSONResponse:
 
 
 @router.post("/v1/messages", dependencies=[Depends(_verify_bearer)])
-async def messages(request: Request) -> JSONResponse | StreamingResponse:
+async def messages(request: Request):  # Removed union type to avoid FastAPI/Pydantic issues
     """
     Main proxy endpoint.
 
@@ -215,7 +191,7 @@ async def messages(request: Request) -> JSONResponse | StreamingResponse:
         )
 
     # result is a dict
-    return JSONResponse(result)  # type: ignore[arg-type]
+    return JSONResponse(result)
 
 
 # ---------------------------------------------------------------------------
@@ -251,7 +227,7 @@ def _local_probe_response(
     """
     import json  # noqa: PLC0415
 
-    model = body.get("model", "claude-sonnet-4-6")
+    model = body.get("model", "claude-sonnet-4-5")
     canned: dict[str, Any] = {
         "id": f"msg_{uuid.uuid4().hex[:24]}",
         "type": "message",
@@ -270,13 +246,18 @@ def _local_probe_response(
         # Anthropic SSE shape: message_start → content_block_start →
         # content_block_stop → message_delta → message_stop
         events = [
-            ("message_start",       json.dumps({"type": "message_start", "message": canned})),
-            ("content_block_start", json.dumps({"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}})),
-            ("content_block_stop",  json.dumps({"type": "content_block_stop", "index": 0})),
-            ("message_delta",       json.dumps({"type": "message_delta", "delta": {"stop_reason": "end_turn", "stop_sequence": None}, "usage": {"output_tokens": 1}})),
-            ("message_stop",        json.dumps({"type": "message_stop"})),
+            _sse("message_start",       json.dumps({"type": "message_start", "message": canned})),
+            _sse("content_block_start", json.dumps({"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}})),
+            _sse("content_block_delta", json.dumps({"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": " "}})),
+            _sse("content_block_stop",  json.dumps({"type": "content_block_stop", "index": 0})),
+            _sse("message_delta",       json.dumps({"type": "message_delta", "delta": {"stop_reason": "end_turn", "stop_sequence": None}, "usage": {"output_tokens": 1}})),
+            _sse("message_stop",        json.dumps({"type": "message_stop"})),
         ]
         for event_type, data in events:
             yield f"event: {event_type}\ndata: {data}\n\n"
 
     return _gen()
+
+
+# Export constants for use in other modules if needed
+__all__ = ["router"]
