@@ -1,5 +1,10 @@
 # CLASP — Code Quality Review & Test Evaluation Session
 
+> Use this CLAUDE.md only for checkpoint review sessions, run after finishing a sprint and
+> before starting the next one. Swap your normal implementation CLAUDE.md back in afterward.
+> Replace every `Sprint X` below with the actual sprint number you just finished
+> (e.g. "Sprint 3 complete") before starting the session.
+
 ## Role for this session
 
 You are acting as an independent senior software engineer performing a neutral code review
@@ -16,9 +21,9 @@ implementation order and sprint boundaries are in plan.md Section 20.
 
 ## Current checkpoint
 
-**Sprint 2 complete.**
+**Sprint X complete.**
 
-Files in scope for this review: everything implemented through Sprint 2 per plan.md
+Files in scope for this review: everything implemented through Sprint X per plan.md
 Section 20. Confirm the exact file list by checking the "files completed so far" list in
 the project's regular CLAUDE.md, or by running `git log --oneline` / `git diff --stat
 <last-checkpoint-tag>..HEAD` if commits are tagged per sprint. If scope is unclear, list
@@ -62,7 +67,7 @@ Write findings to `report.md` at the repo root, **overwriting any previous versi
 this exact structure:
 
 ```markdown
-# Code Quality Report — Sprint 2 Checkpoint
+# Code Quality Report — Sprint X Checkpoint
 Date: [today's date]
 Files reviewed: [count]
 
@@ -114,7 +119,7 @@ Write findings to `evaluation.md` at the repo root, **overwriting any previous v
 using this exact structure:
 
 ```markdown
-# Test Evaluation — Sprint 2 Checkpoint
+# Test Evaluation — Sprint X Checkpoint
 Date: [today's date]
 
 ## Summary

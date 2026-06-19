@@ -466,6 +466,40 @@ _model_list_cache: dict[str, tuple[float, list[str]]] = {}
 _MODEL_CACHE_TTL = 3600.0  # 1 hour
 
 
+def _models_endpoint_for(profile, settings_provider) -> tuple[str, dict[str, str]]:
+    """
+    Build (url, headers) for a provider's live model-list endpoint, based on
+    its catalog transport type. Mirrors the auth conventions used by
+    providers/openai_transport.py and providers/anthropic_transport.py.
+
+      - tier == "local"               -> no auth, OpenAI-compatible /v1/models
+      - transport == "anthropic_messages" -> x-api-key header, swap
+                                              .../messages -> .../models
+      - otherwise (openai_chat, etc.) -> Authorization: Bearer <key>,
+                                          base_url already ends in /v1
+    """
+    base_url = profile.base_url.rstrip("/")
+    key = None
+    keys = getattr(settings_provider, "keys", None) or []
+    if keys:
+        key = keys[0]
+
+    if getattr(profile, "tier", None) == "local":
+        # ollama / lm_studio — no auth, OpenAI-compatible /v1/models
+        return f"{base_url}/v1/models", {}
+
+    if getattr(profile, "transport", None) == "anthropic_messages":
+        # e.g. fireworks: base_url ends in /v1/messages -> swap for /v1/models
+        url = base_url.rsplit("/messages", 1)[0] + "/models"
+        headers = {"x-api-key": key} if key else {}
+        return url, headers
+
+    # openai_chat (most providers): base_url already ends in /v1
+    url = f"{base_url}/models"
+    headers = {"Authorization": f"Bearer {key}"} if key else {}
+    return url, headers
+
+
 @router.get(
     "/providers/{provider_name}/models",
     summary="Live model list for a provider (cached 1 h)",
@@ -475,6 +509,9 @@ async def list_provider_models(provider_name: str) -> dict[str, Any]:
     Fetch the live model list from a provider's API and return it.
     Results are cached in-process for 1 hour to avoid hammering the
     provider's endpoint on every page load.
+
+    URL/header construction is transport-aware (local / anthropic_messages /
+    openai_chat) via ``_models_endpoint_for`` — see that helper for details.
     """
     now = time.monotonic()
     cached = _model_list_cache.get(provider_name)
@@ -493,17 +530,16 @@ async def list_provider_models(provider_name: str) -> dict[str, Any]:
         )
 
     keys = getattr(pcfg, "keys", [])
-    if not keys:
+    if not keys and getattr(profile, "tier", None) != "local":
         raise HTTPException(
             status_code=400,
             detail=f"No API keys configured for provider: {provider_name!r}",
         )
 
-    base_url = profile.base_url.rstrip("/")
-    headers = {"Authorization": f"Bearer {keys[0]}"}
+    url, headers = _models_endpoint_for(profile, pcfg)
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
-            resp = await client.get(f"{base_url}/models", headers=headers)
+            resp = await client.get(url, headers=headers)
         resp.raise_for_status()
         data = resp.json()
         models: list[str] = [m.get("id", "") for m in data.get("data", []) if m.get("id")]

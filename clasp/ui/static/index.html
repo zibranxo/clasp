@@ -1,10 +1,6 @@
 <!--
-  CLASP web UI — Sprint 1 minimal build.
-
-  Scope for this milestone: Providers panel ONLY (add/remove/save API keys).
-  The full 6-panel app (Models, Dashboard, Routing, Advanced, Logs + live SSE
-  stream) is built in Sprint 6 — see plan.md §15 and §20 step 71-73. This file
-  is intentionally a subset so it's easy to extend later without a rewrite.
+  CLASP web UI — Full build (plan.md §15, Phase 7).
+  6 panels: Providers, Models, Dashboard, Routing, Advanced, Logs.
 -->
 <!DOCTYPE html>
 <html lang="en" class="h-full bg-gray-950 text-gray-100">
@@ -13,6 +9,9 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>CLASP — Claude API Switching Proxy</title>
   <script src="https://cdn.tailwindcss.com"></script>
+  <!-- Collapse plugin must load BEFORE alpine core for the x-collapse
+       directive used on the Providers panel cards to work. -->
+  <script defer src="https://cdn.jsdelivr.net/npm/@alpinejs/collapse@3.x.x/dist/cdn.min.js"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3/dist/cdn.min.js"></script>
   <script src="/ui/assets/app.js"></script>
   <link rel="stylesheet" href="/ui/assets/style.css">
@@ -35,6 +34,14 @@
                  border-b border-gray-800 z-10">
     <span class="font-mono font-bold text-green-400 text-xl tracking-tight">◆ CLASP</span>
     <span class="text-gray-600 text-sm font-mono" x-text="'v' + meta.version"></span>
+
+    <div class="flex items-center gap-1.5 ml-2">
+      <span class="w-2 h-2 rounded-full transition-colors"
+            :class="meta.status === 'healthy' ? 'bg-green-400' : 'bg-red-400'"></span>
+      <span class="text-sm text-gray-300"
+            x-text="meta.status === 'healthy' ? 'RUNNING' : 'ERROR'"></span>
+      <span class="text-gray-600 text-sm" x-text="'· port ' + meta.port"></span>
+    </div>
 
     <div class="ml-auto flex items-center gap-3">
       <!-- Unsaved changes indicator -->
@@ -60,6 +67,37 @@
   <!-- ── Body ─────────────────────────────────────────────────── -->
   <div class="flex flex-1 overflow-hidden">
 
+    <!-- Sidebar nav -->
+    <nav class="w-52 shrink-0 bg-gray-900 border-r border-gray-800
+                flex flex-col py-4 overflow-y-auto">
+      <template x-for="item in nav" :key="item.id">
+        <button @click="panel = item.id"
+                :class="panel === item.id
+                  ? 'bg-gray-800 text-white border-l-2 border-green-400'
+                  : 'text-gray-400 hover:text-white hover:bg-gray-800/50 border-l-2 border-transparent'"
+                class="flex items-center gap-3 px-4 py-2.5 text-sm w-full text-left transition-all">
+          <span class="text-base" x-text="item.icon"></span>
+          <span x-text="item.label"></span>
+        </button>
+      </template>
+
+      <!-- Sidebar footer: live mini-stats -->
+      <div class="mt-auto px-4 pt-4 border-t border-gray-800 text-xs space-y-1.5">
+        <div class="flex items-center gap-1.5">
+          <span class="w-1.5 h-1.5 rounded-full"
+                :class="live.status === 'healthy' ? 'bg-green-400' : 'bg-red-400'"></span>
+          <span class="text-gray-400"
+                x-text="live.status === 'healthy' ? 'Healthy' : 'Error'"></span>
+        </div>
+        <div class="text-gray-500" x-text="'Queue: ' + (live.queue_depth ?? 0)"></div>
+        <div class="text-gray-500"
+             x-text="((live.requests_today ?? 0)).toLocaleString() + ' req today'"></div>
+        <div class="text-gray-500"
+             x-text="(live.active_requests ?? 0) + ' active'"></div>
+      </div>
+    </nav>
+
+    <!-- Content area -->
     <main class="flex-1 overflow-y-auto bg-gray-950">
 
       <!-- Toast notification -->
@@ -74,17 +112,13 @@
       </template>
 
       <!-- ── Providers Panel ── -->
-      <div class="p-6 max-w-4xl space-y-4">
+      <div x-show="panel === 'providers'" class="p-6 max-w-4xl space-y-4">
         <div>
           <h1 class="text-xl font-semibold text-white">API Providers</h1>
           <p class="text-gray-500 text-sm mt-1">
             Add API keys for free-tier providers. CLASP routes across them to avoid rate limits.
           </p>
         </div>
-
-        <template x-if="!Object.keys(config.providers ?? {}).length">
-          <div class="text-gray-500 text-sm">Loading providers…</div>
-        </template>
 
         <template x-for="(prov, name) in config.providers" :key="name">
           <div class="bg-gray-900 border border-gray-800 rounded-xl overflow-hidden">
@@ -95,6 +129,11 @@
                 <div class="flex items-center gap-2">
                   <span class="font-medium text-white"
                         x-text="catalog[name]?.display_name ?? name"></span>
+                  <!-- Live status badge -->
+                  <span class="text-xs px-2 py-0.5 rounded-full font-mono"
+                        :class="providerStatusClass(name)"
+                        x-text="providerStatusText(name)">
+                  </span>
                 </div>
                 <div class="text-xs text-gray-500 mt-0.5"
                      x-text="catalog[name]?.free_tier_note"></div>
@@ -141,26 +180,498 @@
                           <span x-text="key._reveal ? '🙈' : '👁'"></span>
                         </button>
                       </div>
+                      <button @click="testKey(name, key.value, idx)"
+                              :disabled="!key.value || key._testing"
+                              class="px-2.5 py-2 text-xs bg-gray-800 hover:bg-gray-700
+                                     border border-gray-700 rounded-lg disabled:opacity-40
+                                     transition-colors whitespace-nowrap">
+                        <span x-show="!key._testing">Test</span>
+                        <span x-show="key._testing">…</span>
+                      </button>
+                      <div class="text-xs w-20 text-right"
+                           :class="key._testResult?.ok ? 'text-green-400' : 'text-red-400'"
+                           x-text="key._testResult ? (key._testResult.ok ? '✓ ' + key._testResult.latency_ms + 'ms' : '✗ ' + (key._testResult.error?.slice(0,12))) : ''">
+                      </div>
                       <button @click="removeKey(name, idx)"
                               class="text-gray-600 hover:text-red-400 transition-colors text-lg leading-none">
                         ×
                       </button>
                     </div>
                   </template>
-                  <template x-if="!prov.keys.length">
-                    <div class="text-xs text-gray-600">No keys added yet.</div>
-                  </template>
                 </div>
               </div>
 
-              <!-- Catalog default (read-only reference, no override UI yet — Sprint 6) -->
-              <div class="text-xs text-gray-600">
-                Catalog default: <span x-text="catalog[name]?.rpm_limit"></span> RPM
+              <!-- Limit overrides (collapsible) -->
+              <details class="text-sm">
+                <summary class="text-gray-500 cursor-pointer hover:text-gray-300 select-none">
+                  Override limits (catalog default: <span x-text="catalog[name]?.rpm_limit"></span> RPM)
+                </summary>
+                <div class="mt-3 grid grid-cols-2 gap-3">
+                  <div>
+                    <label class="block text-xs text-gray-500 mb-1">RPM Limit</label>
+                    <input type="number" x-model="prov.rpm_limit" @input="markDirty()"
+                           :placeholder="catalog[name]?.rpm_limit"
+                           class="w-full bg-gray-800 border border-gray-700 rounded px-2 py-1.5
+                                  text-sm text-gray-200 focus:outline-none focus:border-green-500">
+                  </div>
+                  <div>
+                    <label class="block text-xs text-gray-500 mb-1">Soft Threshold (%)</label>
+                    <input type="number" min="50" max="95" x-model="prov.soft_threshold_pct"
+                           @input="markDirty()" placeholder="80"
+                           class="w-full bg-gray-800 border border-gray-700 rounded px-2 py-1.5
+                                  text-sm text-gray-200 focus:outline-none focus:border-green-500">
+                  </div>
+                </div>
+              </details>
+
+              <!-- Today's usage (from live data) -->
+              <div class="text-xs text-gray-600 flex gap-4">
+                <span x-text="(live.providers?.[name]?.requests_today ?? 0).toLocaleString() + ' req today'"></span>
+                <span x-text="((live.providers?.[name]?.tokens_today ?? 0) / 1000).toFixed(0) + 'k tokens'"></span>
+                <span x-text="(live.providers?.[name]?.errors_today ?? 0) + ' errors'"></span>
               </div>
             </div>
           </div>
         </template>
       </div><!-- /providers panel -->
+
+      <!-- ── Models Panel ── -->
+      <div x-show="panel === 'models'" class="p-6 max-w-3xl space-y-6">
+        <div>
+          <h1 class="text-xl font-semibold text-white">Model Overrides</h1>
+          <p class="text-gray-500 text-sm mt-1">
+            Map Claude model families to actual provider models.
+          </p>
+        </div>
+
+        <!-- Tier rows -->
+        <div class="bg-gray-900 border border-gray-800 rounded-xl overflow-hidden divide-y divide-gray-800">
+          <template x-for="tier in modelTiers" :key="tier.key">
+            <div class="flex items-center gap-4 px-5 py-4">
+              <div class="w-40 shrink-0">
+                <div class="text-sm font-mono text-gray-200" x-text="tier.label"></div>
+                <div class="text-xs text-gray-600 mt-0.5" x-text="tier.hint"></div>
+              </div>
+              <span class="text-gray-600">→</span>
+              <!-- Provider dropdown -->
+              <select x-model="config.routing.models[tier.key + '_provider']"
+                      @change="markDirty()"
+                      class="bg-gray-800 border border-gray-700 rounded-lg px-2 py-1.5
+                             text-sm text-gray-200 focus:outline-none focus:border-green-500">
+                <template x-for="p in enabledProviders()" :key="p">
+                  <option :value="p" x-text="catalog[p]?.display_name ?? p"></option>
+                </template>
+              </select>
+              <!-- Model slug input -->
+              <input type="text"
+                     x-model="config.routing.models[tier.key]"
+                     @input="markDirty()"
+                     placeholder="provider/model-slug"
+                     class="flex-1 bg-gray-800 border border-gray-700 rounded-lg px-3 py-1.5
+                            text-sm font-mono text-gray-200 focus:outline-none focus:border-green-500">
+            </div>
+          </template>
+        </div>
+
+        <!-- By-type overrides -->
+        <div>
+          <h2 class="text-base font-medium text-white mb-3">Override by Request Type</h2>
+          <div class="bg-gray-900 border border-gray-800 rounded-xl overflow-hidden divide-y divide-gray-800">
+            <template x-for="rt in requestTypes" :key="rt.key">
+              <div class="flex items-center gap-4 px-5 py-3">
+                <div class="w-48 shrink-0">
+                  <div class="text-sm text-gray-200" x-text="rt.label"></div>
+                  <div class="text-xs text-gray-600" x-text="rt.hint"></div>
+                </div>
+                <span class="text-gray-600">→</span>
+                <input type="text"
+                       x-model="config.routing.by_type[rt.key]"
+                       @input="markDirty()"
+                       placeholder="provider/model-slug  (blank = use chain)"
+                       class="flex-1 bg-gray-800 border border-gray-700 rounded-lg px-3 py-1.5
+                              text-sm font-mono text-gray-200 focus:outline-none focus:border-green-500">
+              </div>
+            </template>
+          </div>
+        </div>
+
+        <div class="flex gap-3">
+          <button @click="resetModelDefaults()"
+                  class="px-4 py-2 text-sm text-gray-400 hover:text-white border border-gray-700
+                         hover:border-gray-600 rounded-lg transition-colors">
+            Reset to defaults
+          </button>
+        </div>
+      </div><!-- /models panel -->
+
+      <!-- ── Dashboard Panel ── -->
+      <div x-show="panel === 'dashboard'" class="p-6 space-y-4">
+        <!-- System status bar -->
+        <div class="flex items-center gap-4 bg-gray-900 rounded-xl px-5 py-3 border border-gray-800">
+          <div class="flex items-center gap-2">
+            <span class="w-2.5 h-2.5 rounded-full"
+                  :class="live.status === 'healthy' ? 'bg-green-400' : 'bg-red-400'"></span>
+            <span class="font-medium"
+                  x-text="live.status === 'healthy' ? 'HEALTHY' : 'ERROR'"></span>
+          </div>
+          <span class="text-gray-500 text-sm" x-text="'Uptime: ' + formatUptime(live.uptime_seconds)"></span>
+          <span class="text-gray-500 text-sm" x-text="(live.active_requests ?? 0) + ' active request(s)'"></span>
+          <span class="ml-auto text-gray-500 text-sm">
+            Queue: <span class="text-white font-mono" x-text="live.queue_depth ?? 0"></span>
+          </span>
+        </div>
+
+        <!-- Provider cards grid -->
+        <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
+          <template x-for="(pdata, name) in (live.providers ?? {})" :key="name">
+            <div class="bg-gray-900 border border-gray-800 rounded-xl p-5 space-y-3">
+              <div class="flex items-center justify-between">
+                <span class="font-medium text-white"
+                      x-text="catalog[name]?.display_name ?? name"></span>
+                <span class="text-xs px-2 py-0.5 rounded-full"
+                      :class="providerStatusClass(name)"
+                      x-text="providerStatusText(name)"></span>
+              </div>
+
+              <!-- Per-key RPM bars -->
+              <template x-for="key in (pdata.keys ?? [])" :key="key.index">
+                <div class="space-y-1">
+                  <div class="flex justify-between text-xs text-gray-500">
+                    <span x-text="'Key ' + (key.index+1) + ': ' + key.redacted"></span>
+                    <span x-show="key.status !== 'COOLING_DOWN'"
+                          x-text="key.rpm_used + '/' + key.rpm_limit + ' rpm'"></span>
+                    <span x-show="key.status === 'COOLING_DOWN'"
+                          class="text-orange-400"
+                          x-text="'♻ ' + Math.ceil(key.recovery_in) + 's'"></span>
+                  </div>
+                  <div class="h-1.5 bg-gray-800 rounded-full overflow-hidden">
+                    <div class="h-full rounded-full transition-all duration-500"
+                         :class="key.rpm_used / key.rpm_limit > 0.8 ? 'bg-red-500' :
+                                 key.rpm_used / key.rpm_limit > 0.5 ? 'bg-yellow-500' :
+                                 'bg-green-500'"
+                         :style="'width: ' + Math.min(100, (key.rpm_used / key.rpm_limit * 100)) + '%'">
+                    </div>
+                  </div>
+                </div>
+              </template>
+
+              <!-- Daily token usage (if limit exists) -->
+              <template x-if="pdata.daily_token_limit">
+                <div class="space-y-1">
+                  <div class="flex justify-between text-xs text-gray-500">
+                    <span>Tokens today</span>
+                    <span x-text="(pdata.tokens_today/1000).toFixed(0) + 'k / '
+                                  + (pdata.daily_token_limit/1000).toFixed(0) + 'k'"></span>
+                  </div>
+                  <div class="h-1.5 bg-gray-800 rounded-full overflow-hidden">
+                    <div class="h-full bg-blue-500 rounded-full transition-all duration-500"
+                         :style="'width: ' + Math.min(100, pdata.tokens_today / pdata.daily_token_limit * 100) + '%'">
+                    </div>
+                  </div>
+                </div>
+              </template>
+
+              <div class="text-xs text-gray-600"
+                   x-text="'P50: ' + (pdata.p50_latency_ms ?? '—') + 'ms'">
+              </div>
+            </div>
+          </template>
+        </div>
+
+        <!-- Usage summary row -->
+        <div class="grid grid-cols-2 md:grid-cols-4 gap-4">
+          <div class="bg-gray-900 border border-gray-800 rounded-xl p-4">
+            <div class="text-2xl font-bold text-white font-mono"
+                 x-text="(live.requests_today ?? 0).toLocaleString()"></div>
+            <div class="text-xs text-gray-500 mt-1">Requests today</div>
+          </div>
+          <div class="bg-gray-900 border border-gray-800 rounded-xl p-4">
+            <div class="text-2xl font-bold text-white font-mono"
+                 x-text="((live.tokens_today ?? 0) / 1000).toFixed(0) + 'k'"></div>
+            <div class="text-xs text-gray-500 mt-1">Tokens used</div>
+          </div>
+          <div class="bg-gray-900 border border-gray-800 rounded-xl p-4">
+            <div class="text-2xl font-bold text-green-400 font-mono"
+                 x-text="live.absorbed_429s_today ?? 0"></div>
+            <div class="text-xs text-gray-500 mt-1">429s absorbed</div>
+          </div>
+          <div class="bg-gray-900 border border-gray-800 rounded-xl p-4">
+            <div class="text-2xl font-bold text-blue-400 font-mono"
+                 x-text="live.cache_hits_today ?? 0"></div>
+            <div class="text-xs text-gray-500 mt-1">Cache hits</div>
+          </div>
+        </div>
+      </div><!-- /dashboard panel -->
+
+      <!-- ── Routing Panel ── -->
+      <div x-show="panel === 'routing'" class="p-6 max-w-2xl space-y-6">
+        <div>
+          <h1 class="text-xl font-semibold text-white">Provider Routing</h1>
+          <p class="text-gray-500 text-sm mt-1">
+            CLASP tries providers top-to-bottom. Drag to reorder.
+            Cooling or unhealthy providers are automatically skipped.
+          </p>
+        </div>
+
+        <!-- Chain list -->
+        <div class="bg-gray-900 border border-gray-800 rounded-xl overflow-hidden divide-y divide-gray-800">
+          <template x-for="(name, idx) in config.provider_chain" :key="name">
+            <div class="flex items-center gap-3 px-5 py-3">
+              <span class="text-gray-600 cursor-grab select-none text-lg">≡</span>
+              <span class="text-gray-500 font-mono text-sm w-5" x-text="idx + 1 + '.'"></span>
+              <span class="flex-1 text-sm text-white"
+                    x-text="catalog[name]?.display_name ?? name"></span>
+              <span class="text-xs px-2 py-0.5 rounded-full"
+                    :class="providerStatusClass(name)"
+                    x-text="providerStatusText(name)"></span>
+              <button @click="removeFromChain(idx)"
+                      class="text-gray-600 hover:text-red-400 text-sm transition-colors">
+                Remove
+              </button>
+            </div>
+          </template>
+        </div>
+
+        <!-- Strategy selector -->
+        <div>
+          <h2 class="text-base font-medium text-white mb-3">Routing Strategy</h2>
+          <div class="space-y-2">
+            <template x-for="strat in strategies" :key="strat.key">
+              <label class="flex items-start gap-3 cursor-pointer group">
+                <input type="radio" name="strategy"
+                       :value="strat.key" x-model="config.routing.strategy"
+                       @change="markDirty()"
+                       class="mt-0.5 accent-green-500">
+                <div>
+                  <div class="text-sm text-white" x-text="strat.label"></div>
+                  <div class="text-xs text-gray-500" x-text="strat.description"></div>
+                </div>
+              </label>
+            </template>
+          </div>
+        </div>
+      </div><!-- /routing panel -->
+
+      <!-- ── Advanced Panel ── -->
+      <div x-show="panel === 'advanced'" class="p-6 max-w-2xl space-y-6">
+        <h1 class="text-xl font-semibold text-white">Advanced Settings</h1>
+
+        <!-- Server settings -->
+        <div class="bg-gray-900 border border-gray-800 rounded-xl p-5 space-y-4">
+          <h2 class="text-sm font-medium text-gray-400 uppercase tracking-wider">Server</h2>
+          <div class="grid grid-cols-2 gap-4">
+            <div>
+              <label class="block text-xs text-gray-500 mb-1">Proxy Port</label>
+              <input type="number" x-model="config.server.port" @input="markDirty()"
+                     class="input-field">
+            </div>
+            <div>
+              <label class="block text-xs text-gray-500 mb-1">API Key (Bearer token)</label>
+              <input type="text" x-model="config.server.api_key" @input="markDirty()"
+                     class="input-field font-mono">
+            </div>
+            <div>
+              <label class="block text-xs text-gray-500 mb-1">Request Timeout (s)</label>
+              <input type="number" x-model="config.server.request_timeout_seconds"
+                     @input="markDirty()" class="input-field">
+            </div>
+            <div>
+              <label class="block text-xs text-gray-500 mb-1">Max Queue Depth</label>
+              <input type="number" x-model="config.server.max_queue_depth"
+                     @input="markDirty()" class="input-field">
+            </div>
+            <div>
+              <label class="block text-xs text-gray-500 mb-1">Max Queue Wait (s)</label>
+              <input type="number" x-model="config.server.max_queue_wait_seconds"
+                     @input="markDirty()" class="input-field">
+            </div>
+            <div>
+              <label class="block text-xs text-gray-500 mb-1">Log Level</label>
+              <select x-model="config.server.log_level" @change="markDirty()"
+                      class="input-field">
+                <option>DEBUG</option><option>INFO</option>
+                <option>WARNING</option><option>ERROR</option>
+              </select>
+            </div>
+          </div>
+        </div>
+
+        <!-- Cache settings -->
+        <div class="bg-gray-900 border border-gray-800 rounded-xl p-5 space-y-4">
+          <div class="flex items-center justify-between">
+            <h2 class="text-sm font-medium text-gray-400 uppercase tracking-wider">Cache</h2>
+            <label class="flex items-center gap-2 cursor-pointer">
+              <input type="checkbox" x-model="config.cache.enabled" @change="markDirty()"
+                     class="accent-green-500">
+              <span class="text-sm text-gray-400">Enabled</span>
+            </label>
+          </div>
+          <div class="grid grid-cols-2 gap-4" :class="config.cache.enabled ? '' : 'opacity-50'">
+            <div>
+              <label class="block text-xs text-gray-500 mb-1">Memory Entries</label>
+              <input type="number" x-model="config.cache.memory_max_entries"
+                     @input="markDirty()" :disabled="!config.cache.enabled"
+                     class="input-field">
+            </div>
+            <div>
+              <label class="block text-xs text-gray-500 mb-1">SQLite TTL (s)</label>
+              <input type="number" x-model="config.cache.sqlite_ttl_seconds"
+                     @input="markDirty()" :disabled="!config.cache.enabled"
+                     class="input-field">
+            </div>
+          </div>
+          <button @click="clearCache()"
+                  class="text-xs text-red-400 hover:text-red-300 transition-colors">
+            Clear cache
+          </button>
+        </div>
+
+        <!-- Optimizer settings -->
+        <div class="bg-gray-900 border border-gray-800 rounded-xl p-5 space-y-4">
+          <h2 class="text-sm font-medium text-gray-400 uppercase tracking-wider">Optimizer</h2>
+          <div class="space-y-3">
+            <label class="flex items-center gap-3 cursor-pointer">
+              <input type="checkbox" x-model="config.optimizer.local_probe_answering"
+                     @change="markDirty()" class="accent-green-500">
+              <div>
+                <div class="text-sm text-gray-200">Answer trivial probes locally</div>
+                <div class="text-xs text-gray-500">Saves ~50 API calls per session</div>
+              </div>
+            </label>
+            <label class="flex items-center gap-3 cursor-pointer">
+              <input type="checkbox" x-model="config.optimizer.system_prompt_dedup"
+                     @change="markDirty()" class="accent-green-500">
+              <div>
+                <div class="text-sm text-gray-200">System prompt deduplication</div>
+                <div class="text-xs text-gray-500">Saves tokens on providers with prefix caching</div>
+              </div>
+            </label>
+            <label class="flex items-center gap-3 cursor-pointer">
+              <input type="checkbox" x-model="config.optimizer.context_pruning.enabled"
+                     @change="markDirty()" class="accent-green-500">
+              <div>
+                <div class="text-sm text-gray-200">Context pruning</div>
+                <div class="text-xs text-gray-500">Trim history for small-context providers</div>
+              </div>
+            </label>
+          </div>
+          <div x-show="config.optimizer.context_pruning.enabled" class="pl-6 space-y-3">
+            <div>
+              <label class="block text-xs text-gray-500 mb-2">Pruning strategy</label>
+              <div class="flex gap-4">
+                <template x-for="s in ['keep_edges','truncate','summarize']" :key="s">
+                  <label class="flex items-center gap-1.5 cursor-pointer">
+                    <input type="radio" name="pruning" :value="s"
+                           x-model="config.optimizer.context_pruning.strategy"
+                           @change="markDirty()" class="accent-green-500">
+                    <span class="text-sm text-gray-300" x-text="s"></span>
+                  </label>
+                </template>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Shared pool settings -->
+        <div class="bg-gray-900 border border-gray-800 rounded-xl p-5 space-y-4">
+          <div class="flex items-center justify-between">
+            <div>
+              <h2 class="text-sm font-medium text-gray-400 uppercase tracking-wider">Shared Pool</h2>
+              <p class="text-xs text-gray-600 mt-0.5">
+                Allow study group members to share your proxy over a VPS or ngrok.
+              </p>
+            </div>
+            <label class="flex items-center gap-2 cursor-pointer">
+              <input type="checkbox" x-model="config.shared_pool.enabled" @change="markDirty()"
+                     class="accent-green-500">
+              <span class="text-sm text-gray-400">Enable</span>
+            </label>
+          </div>
+          <div x-show="config.shared_pool.enabled" class="space-y-3">
+            <div>
+              <label class="block text-xs text-gray-500 mb-1">Per-user RPM limit</label>
+              <input type="number" x-model="config.shared_pool.per_user_rpm_limit"
+                     @input="markDirty()" class="input-field w-32">
+            </div>
+            <div>
+              <label class="block text-xs text-gray-500 mb-1">
+                Auth tokens (one per line — share these with your group)
+              </label>
+              <textarea rows="4"
+                        x-model="sharedPoolTokensText"
+                        @input="syncSharedTokens()"
+                        placeholder="token-alice&#10;token-bob&#10;token-charlie"
+                        class="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2
+                               text-sm font-mono text-gray-200 focus:outline-none
+                               focus:border-green-500 resize-none">
+              </textarea>
+            </div>
+          </div>
+        </div>
+
+        <div class="flex gap-3">
+          <button @click="exportConfig()"
+                  class="px-4 py-2 text-sm text-gray-300 border border-gray-700
+                         hover:border-gray-500 rounded-lg transition-colors">
+            Export config.yaml
+          </button>
+          <label class="px-4 py-2 text-sm text-gray-300 border border-gray-700
+                        hover:border-gray-500 rounded-lg transition-colors cursor-pointer">
+            Import config.yaml
+            <input type="file" accept=".yaml,.yml" @change="importConfig($event)" class="hidden">
+          </label>
+        </div>
+      </div><!-- /advanced panel -->
+
+      <!-- ── Logs Panel ── -->
+      <div x-show="panel === 'logs'" class="p-6 flex flex-col h-full">
+        <div class="flex items-center gap-4 mb-4">
+          <h1 class="text-xl font-semibold text-white">Live Logs</h1>
+          <div class="flex items-center gap-1.5 ml-2">
+            <span class="w-2 h-2 rounded-full bg-green-400 animate-pulse"></span>
+            <span class="text-xs text-gray-500">Live</span>
+          </div>
+          <select x-model="logLevel"
+                  class="ml-auto bg-gray-800 border border-gray-700 rounded px-2 py-1 text-sm">
+            <option value="DEBUG">DEBUG+</option>
+            <option value="INFO" selected>INFO+</option>
+            <option value="WARNING">WARNING+</option>
+            <option value="ERROR">ERROR+</option>
+          </select>
+          <button @click="logLines = []"
+                  class="px-2.5 py-1 text-xs text-gray-400 hover:text-white border border-gray-700
+                         hover:border-gray-500 rounded transition-colors">
+            Clear
+          </button>
+          <a href="/internal/logs/download"
+             class="px-2.5 py-1 text-xs text-gray-400 hover:text-white border border-gray-700
+                    hover:border-gray-500 rounded transition-colors">
+            Download
+          </a>
+        </div>
+        <div class="flex-1 bg-gray-900 border border-gray-800 rounded-xl overflow-y-auto
+                    font-mono text-xs p-4 space-y-0.5" id="log-container">
+          <template x-for="(line, i) in filteredLogs()" :key="i">
+            <div class="flex gap-3 py-0.5 hover:bg-gray-800/50 px-1 rounded">
+              <span class="text-gray-600 shrink-0" x-text="line.time"></span>
+              <span class="w-14 shrink-0 font-bold"
+                    :class="{
+                      'text-red-400': line.level === 'ERROR',
+                      'text-yellow-400': line.level === 'WARNING',
+                      'text-blue-400': line.level === 'DEBUG',
+                      'text-gray-400': line.level === 'INFO'
+                    }"
+                    x-text="line.level">
+              </span>
+              <span class="text-gray-300" x-text="line.message"></span>
+              <span class="text-gray-600 ml-auto shrink-0" x-text="line.provider ?? ''"></span>
+            </div>
+          </template>
+          <div x-show="filteredLogs().length === 0" class="text-gray-600 py-4 text-center">
+            No log entries at this level yet.
+          </div>
+        </div>
+      </div><!-- /logs panel -->
 
     </main>
   </div>

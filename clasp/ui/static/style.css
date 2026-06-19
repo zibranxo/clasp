@@ -10,7 +10,50 @@
 #log-container::-webkit-scrollbar-track { background: transparent; }
 #log-container::-webkit-scrollbar-thumb { background: #374151; border-radius: 3px; }
 
+/* Smooth panel transitions *//*
+ * CLASP web UI — custom styles beyond Tailwind (loaded from CDN in index.html).
+ *
+ * NOTE on .input-field: this is written as plain CSS rather than
+ * `@apply ...`. The Tailwind Play CDN (<script src="cdn.tailwindcss.com">)
+ * only processes class names found directly in the HTML it scans, plus
+ * inline <style type="text/tailwindcss"> blocks — it does NOT run a build
+ * step over externally linked stylesheets like this one, so `@apply` here
+ * would silently resolve to nothing and every Advanced-panel input would
+ * end up unstyled. The values below are the plain-CSS equivalent of:
+ *   w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-1.5
+ *   text-sm text-gray-200 focus:outline-none focus:border-green-500
+ *   transition-colors disabled:opacity-50
+ */
+.input-field {
+  width: 100%;
+  background-color: #1f2937;   /* gray-800 */
+  border: 1px solid #374151;   /* gray-700 */
+  border-radius: 0.5rem;       /* rounded-lg */
+  padding: 0.375rem 0.75rem;   /* py-1.5 px-3 */
+  font-size: 0.875rem;         /* text-sm */
+  line-height: 1.25rem;
+  color: #e5e7eb;              /* gray-200 */
+  outline: none;
+  transition: background-color 150ms ease, border-color 150ms ease, color 150ms ease;
+}
+.input-field:focus {
+  border-color: #22c55e;       /* green-500 */
+}
+.input-field:disabled {
+  opacity: 0.5;
+}
+
+/* Log container scrollbar (Logs panel) */
+#log-container::-webkit-scrollbar { width: 6px; }
+#log-container::-webkit-scrollbar-track { background: transparent; }
+#log-container::-webkit-scrollbar-thumb { background: #374151; border-radius: 3px; }
+
 /* Smooth panel transitions */
+[x-show] { transition: opacity 0.15s ease; }
+
+/* Provider card collapse animation (Alpine x-collapse, requires the
+   @alpinejs/collapse plugin script in index.html's <head>) */
+[x-collapse] { transition: height 0.2s ease, opacity 0.2s ease; }
 [x-show] { transition: opacity 0.15s ease; }
 
 /* Provider card collapse animation (Alpine x-collapse) */
