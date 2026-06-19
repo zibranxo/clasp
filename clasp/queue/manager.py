@@ -1,217 +1,150 @@
 """
 clasp/queue/manager.py
-Priority queue for requests that can't be dispatched immediately.
 
-Priority levels:
-  0 = INTERACTIVE  — user is waiting; highest priority
-  1 = TOOL_USE     — tool call mid-session
-  2 = BACKGROUND   — file indexing, summarization
+Priority queue + background drain loop for requests that couldn't be served
+immediately (every provider in the chain was disabled, circuit-broken,
+cooling, or out of rate-limit headroom).
 
-The drain_task() coroutine runs as a background asyncio task (started by
-server.py at startup). It retries selector.select() every 1 s until a
-provider becomes available, then dispatches and resolves the Future.
-
-No external dependencies — pure asyncio + heapq.
+Priority levels (lower = served first): 0=INTERACTIVE, 1=TOOL_USE,
+2=BACKGROUND. `asyncio.PriorityQueue` orders by the first tuple element, so
+`enqueue()` pushes `(priority, enqueued_at, queued_request)` — the
+`enqueued_at` timestamp is the tiebreaker, giving FIFO order within the same
+priority tier.
 """
 
 from __future__ import annotations
 
 import asyncio
-import heapq
 import time
 from dataclasses import dataclass, field
-from typing import Any, Awaitable, Callable, Optional
+from typing import TYPE_CHECKING
 
-from clasp.queue.sse_hold import _error_event
+from loguru import logger
 
+from clasp.ratelimit.cooldown import CooldownManager
+from clasp.router.types import AnthropicRequest, SelectorConfig
 
-# ---------------------------------------------------------------------------
-# Types
-# ---------------------------------------------------------------------------
-
-@dataclass(order=False)
-class QueuedRequest:
-    """
-    A request waiting for a provider slot.
-
-    Ordering is by (priority, enqueued_at) so that lower priority numbers
-    and earlier arrival times both favour dispatch.
-    """
-
-    request: Any               # AnthropicRequest or dict (Sprint 1 compat)
-    future: asyncio.Future     # resolved with list[bytes] on success
-    priority: int = 0          # 0=INTERACTIVE, 1=TOOL_USE, 2=BACKGROUND
-    enqueued_at: float = field(default_factory=time.monotonic)
-
-    # Comparison operators for heapq (min-heap — smallest first)
-    def __lt__(self, other: "QueuedRequest") -> bool:
-        return (self.priority, self.enqueued_at) < (other.priority, other.enqueued_at)
-
-    def __le__(self, other: "QueuedRequest") -> bool:
-        return (self.priority, self.enqueued_at) <= (other.priority, other.enqueued_at)
+if TYPE_CHECKING:
+    from clasp.providers.registry import ProviderRegistry
 
 
 class QueueTimeoutError(Exception):
-    """Raised when a queued request exceeds max_wait_seconds."""
+    """Raised (via the future) when a queued request waits longer than
+    `max_wait_seconds` without any provider becoming available."""
 
-    def __str__(self) -> str:
-        return "All providers rate-limited. Try again shortly."
-
-
-# ---------------------------------------------------------------------------
-# Selector type alias (injected; avoids circular import)
-# ---------------------------------------------------------------------------
-
-# Signature: async (request, exclude=None) → (provider, key, key_idx) | None
-SelectorFn = Callable[..., Awaitable[Optional[tuple[Any, str, int]]]]
+    def __init__(self, message: str = "All providers rate-limited. Try again shortly."):
+        super().__init__(message)
 
 
-# ---------------------------------------------------------------------------
-# Queue Manager
-# ---------------------------------------------------------------------------
+@dataclass
+class QueuedRequest:
+    request: AnthropicRequest
+    future: "asyncio.Future"
+    priority: int
+    enqueued_at: float
+
 
 class QueueManager:
-    """
-    Priority queue + background drain task.
+    """Holds the priority queue and runs the background drain loop."""
 
-    Parameters
-    ----------
-    selector_fn:
-        Async callable matching the signature of ``router.selector.select``.
-        Injected to avoid circular imports and to simplify testing.
-    max_wait_seconds:
-        How long a queued request may wait before timing out.
-    drain_poll_interval:
-        How often the drain task polls for an available provider (seconds).
-        Default 1 s; reduced in tests for speed.
-    """
-
-    def __init__(
-        self,
-        selector_fn: SelectorFn,
-        max_wait_seconds: float = 120.0,
-        drain_poll_interval: float = 1.0,
-    ) -> None:
-        self._selector_fn = selector_fn
+    def __init__(self, max_wait_seconds: float = 180.0, drain_poll_interval: float = 1.0) -> None:
         self.max_wait_seconds = max_wait_seconds
-        self._drain_poll_interval = drain_poll_interval
-
-        # Heap invariant maintained by heapq — protected by asyncio.Lock.
-        self._heap: list[QueuedRequest] = []
-        self._lock = asyncio.Lock()
-        self._not_empty = asyncio.Event()
-
-    # ------------------------------------------------------------------
-    # Public API
-    # ------------------------------------------------------------------
+        self.drain_poll_interval = drain_poll_interval
+        self._q: "asyncio.PriorityQueue[tuple[int, float, QueuedRequest]]" = (
+            asyncio.PriorityQueue()
+        )
 
     async def enqueue(self, req: QueuedRequest) -> None:
-        """Add a request to the priority queue."""
-        async with self._lock:
-            heapq.heappush(self._heap, req)
-            self._not_empty.set()
+        """Add *req* to the priority queue, to be picked up by drain_task()."""
+        await self._q.put((req.priority, req.enqueued_at, req))
+        logger.info(
+            "request queued",
+            priority=req.priority,
+            queue_size=self._q.qsize(),
+        )
 
-    async def drain_task(self) -> None:
-        """
-        Background coroutine — runs forever.
-        Dispatches queued requests as provider slots become available.
-        """
-        while True:
-            try:
-                # Wait until the queue is non-empty.
-                await self._not_empty.wait()
-
-                # Peek at the highest-priority item without popping.
-                async with self._lock:
-                    if not self._heap:
-                        self._not_empty.clear()
-                        continue
-                    req = self._heap[0]
-
-                # Try to find a provider.
-                selection = await self._selector_fn(req.request)
-
-                if selection is None:
-                    # Check overall timeout.
-                    if time.monotonic() - req.enqueued_at > self.max_wait_seconds:
-                        async with self._lock:
-                            if self._heap and self._heap[0] is req:
-                                heapq.heappop(self._heap)
-                                if not self._heap:
-                                    self._not_empty.clear()
-                        if not req.future.done():
-                            req.future.set_exception(QueueTimeoutError())
-                    else:
-                        # No provider yet — wait and retry.
-                        await asyncio.sleep(self._drain_poll_interval)
-                    continue
-
-                # We have a selection — pop from queue and dispatch.
-                async with self._lock:
-                    if self._heap and self._heap[0] is req:
-                        heapq.heappop(self._heap)
-                    if not self._heap:
-                        self._not_empty.clear()
-
-                provider, key, key_idx = selection
-                await self._dispatch(req, provider, key, key_idx)
-
-            except asyncio.CancelledError:
-                return
-            except Exception as exc:
-                # Log but keep running.
-                try:
-                    from loguru import logger  # type: ignore[import]
-                    logger.error("drain_task error", exc=str(exc))
-                except ImportError:
-                    import traceback
-                    traceback.print_exc()
-                await asyncio.sleep(1)
-
-    async def _dispatch(
-        self,
-        req: QueuedRequest,
-        provider: Any,
-        key: str,
-        key_idx: int,
-    ) -> None:
-        """Stream from provider and resolve the future with collected chunks."""
-        if req.future.done():
-            return
-        chunks: list[bytes] = []
-        try:
-            async for chunk in provider.stream(req.request, key=key, key_index=key_idx):
-                chunks.append(chunk if isinstance(chunk, bytes) else chunk.encode())
-            req.future.set_result(chunks)
-        except Exception as exc:
-            if not req.future.done():
-                req.future.set_exception(exc)
+    def qsize(self) -> int:
+        return self._q.qsize()
 
     @property
     def depth(self) -> int:
-        return len(self._heap)
+        return self._q.qsize()
+
+    async def drain_task(
+        self,
+        *,
+        config: SelectorConfig | None = None,
+        registry: "ProviderRegistry | None" = None,
+        cooldown_mgr: CooldownManager | None = None,
+    ) -> None:
+        """
+        Background coroutine. Runs forever. Dispatches queued requests as
+        providers recover.
+
+        Parameters mirror `router.selector.select()`'s injectable
+        collaborators so the same `config`/`registry`/`cooldown_mgr`
+        instances used by `queue.absorber.on_upstream_429()` are also used
+        here — important for tests, where each test builds its own
+        isolated set of fakes rather than relying on process-wide
+        singletons.
+        """
+        from clasp.router import selector  # noqa: PLC0415
+
+        while True:
+            try:
+                _priority, _ts, req = await self._q.get()
+                selection = None
+                while selection is None:
+                    selection = await selector.select(
+                        req.request,
+                        config=config,
+                        registry=registry,
+                        cooldown_mgr=cooldown_mgr,
+                    )
+                    if selection is None:
+                        if time.monotonic() - req.enqueued_at > self.max_wait_seconds:
+                            req.future.set_exception(QueueTimeoutError())
+                            self._q.task_done()
+                            break
+                        await asyncio.sleep(self.drain_poll_interval)
+                else:
+                    provider, key, key_idx = selection
+                    chunks: list[bytes] = []
+                    try:
+                        async for chunk in provider.stream(
+                            req.request, key=key, key_index=key_idx
+                        ):
+                            raw = chunk if isinstance(chunk, bytes) else chunk.encode()
+                            chunks.append(raw)
+                        req.future.set_result(chunks)
+                    except Exception as e:  # noqa: BLE001
+                        req.future.set_exception(e)
+                    finally:
+                        self._q.task_done()
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:  # noqa: BLE001
+                logger.error("drain_task error", error=str(e))
+                await asyncio.sleep(1)
 
 
 # ---------------------------------------------------------------------------
-# Module-level singleton (created lazily by absorber / server)
+# Process-wide singleton (production default; tests construct their own
+# QueueManager() instances and pass them explicitly instead).
 # ---------------------------------------------------------------------------
 
-_queue_manager: Optional[QueueManager] = None
+_queue_manager: QueueManager | None = None
 
 
-def init_queue_manager(
-    selector_fn: SelectorFn,
-    max_wait_seconds: float = 120.0,
-    drain_poll_interval: float = 1.0,
-) -> QueueManager:
-    global _queue_manager
-    _queue_manager = QueueManager(
-        selector_fn=selector_fn,
-        max_wait_seconds=max_wait_seconds,
-        drain_poll_interval=drain_poll_interval,
-    )
+def get_queue_manager() -> QueueManager:
+    """Return the process-wide QueueManager singleton, creating it lazily."""
+    global _queue_manager  # noqa: PLW0603
+    if _queue_manager is None:
+        _queue_manager = QueueManager()
     return _queue_manager
 
 
-def get_queue_manager() -> Optional[QueueManager]:
-    return _queue_manager
+def reset_queue_manager() -> None:
+    """Reset the singleton to a fresh QueueManager (test hygiene helper)."""
+    global _queue_manager  # noqa: PLW0603
+    _queue_manager = QueueManager()

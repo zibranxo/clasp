@@ -1,229 +1,174 @@
 """
 clasp/router/selector.py
-============================
-`select()` — walk the provider chain, check capability + key-pool capacity,
-return a ready-to-use `(provider, api_key, key_index)` (plan.md §13 "Phase 5
-— Multi-Provider Chain & Smart Routing", "Provider Selector
-(`router/selector.py`)").
 
-This is a faithful implementation of the pseudocode given in plan.md §13,
-adapted to call the real functions built alongside it this turn:
-`model_map.resolve_model()`, `capability.get()`, and
-`registry.get_key_pool()` (now wired to real `KeyPool` instances rather
-than the Sprint-1 `None` stub — see `providers/registry.py`).
+`select()` walks the provider chain and returns the first provider/key that
+can actually serve a request right now — or `None` if every candidate is
+disabled, circuit-broken, cooling down, or out of rate-limit headroom.
 
-`AnthropicRequest`
+Sprint-3 scope note
 --------------------
-Referenced throughout plan.md (`request.type`, `request.needs_tools`,
-`request.needs_vision`, `request.estimated_tokens`, `request.priority`,
-`request.model`) but never given an explicit dataclass definition or file
-location anywhere in the spec. It's defined here because this module is its
-primary consumer per the `select()` signature plan.md gives
-(`async def select(request: AnthropicRequest, ...)`). `api/service.py`
-constructs one per incoming request (via `api/detect.py` + `token_counter`)
-and imports the type from here; later phases (response cache, absorber/
-queue) that also reference `AnthropicRequest` in plan.md should import it
-from here too, rather than each defining their own.
-
-References: plan.md §13 "Provider Selector (`router/selector.py`)" (the
-            `select()` algorithm below mirrors that pseudocode line-for-
-            line, with real module calls substituted in), §11 (priority
-            levels), §8 [4] (detect → estimate tokens → select).
+This implements the core walk-the-chain + by_type-override + health-check
+algorithm from plan.md §13, but deliberately omits the capability-matching
+(`router/capability.py`), model-slug resolution (`router/model_map.py`), and
+multi-key rotation (`ratelimit/key_pool.py`) pieces — those are Sprint 4/5
+deliverables that don't exist yet. Until then, every provider is assumed
+capable of serving every request, and only a single key (index 0) per
+provider is considered. The seams (`registry.get_keys()`,
+`registry.get_bucket()`) are already shaped so that swapping in a real
+`KeyPool` later won't require changing this function's control flow.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
-try:
-    from loguru import logger
-except ModuleNotFoundError:  # pragma: no cover — shim for test environments
-    import logging as _logging
+from loguru import logger
 
-    class _Shim:
-        _log = _logging.getLogger("clasp.selector")
-
-        def debug(self, msg: str, **kw: Any) -> None:
-            self._log.debug(msg + ("  " + str(kw) if kw else ""))
-
-        def info(self, msg: str, **kw: Any) -> None:
-            self._log.info(msg + ("  " + str(kw) if kw else ""))
-
-    logger = _Shim()  # type: ignore[assignment]
-
-from clasp.api.detect import RequestType
-from clasp.router import capability, model_map
-from clasp.providers import registry
+from clasp.ratelimit.cooldown import CooldownManager, get_cooldown_manager
+from clasp.router.types import AnthropicRequest, ProviderEnableConfig, SelectorConfig
 
 if TYPE_CHECKING:
     from clasp.providers.base import BaseProvider
+    from clasp.providers.registry import ProviderRegistry
 
-
-# ---------------------------------------------------------------------------
-# AnthropicRequest
-# ---------------------------------------------------------------------------
-
-@dataclass
-class AnthropicRequest:
-    """
-    A classified, pre-flight-estimated request ready for provider selection.
-
-    Built by `api/service.py` from the raw request body via `api/detect.py`
-    (for `type`/`needs_tools`/`needs_vision`/`priority`) and
-    `providers/common/token_counter.py` (for `estimated_tokens`).
-
-    Fields
-    ------
-    type:
-        Classification from `api/detect.py`'s `detect()`.
-    model:
-        The Claude model name the client actually requested (e.g.
-        ``"claude-sonnet-4-5-20250929"``) — used by `model_map.resolve_model()`
-        for tier-keyword matching.
-    body:
-        The raw, original Anthropic-format request body. Carried through so
-        `provider.stream()` has the full payload to translate, without the
-        selector needing to know provider-specific transport details.
-    needs_tools / needs_vision:
-        Independent capability gates (see `api/detect.py` module docstring
-        for why these are separate from `type`).
-    estimated_tokens:
-        Pre-flight token estimate (`token_counter.estimate_request_tokens()`),
-        used both for the `max_context_tokens` capability check and as the
-        TPM cost passed to `KeyPool.pick_key()`.
-    priority:
-        Queue priority (`api/detect.py`'s `priority_for()`) — not consumed
-        by `select()` itself, but carried here since plan.md's queue
-        manager (`queue/manager.py`, a later phase) reads it directly off
-        this same object.
-    request_id:
-        Optional correlation id for logging, set by `api/service.py`.
-    """
-
-    type: RequestType
-    model: str
-    body: dict[str, Any] = field(default_factory=dict)
-    needs_tools: bool = False
-    needs_vision: bool = False
-    estimated_tokens: int = 0
-    priority: int = 0
-    request_id: str | None = None
-
-
-# ---------------------------------------------------------------------------
-# select()
-# ---------------------------------------------------------------------------
 
 async def select(
     request: AnthropicRequest,
+    *,
     exclude: set[str] | None = None,
+    config: SelectorConfig | None = None,
+    registry: "ProviderRegistry | None" = None,
+    cooldown_mgr: CooldownManager | None = None,
 ) -> tuple["BaseProvider", str, int] | None:
     """
-    Walk the provider chain and return the first
-    ``(provider, api_key, key_index)`` that can serve *request* right now.
-
-    Candidate order
-    ------------------
-    `settings.routing.by_type` is checked for an override matching
-    `request.type` — if present (and not in *exclude*), that provider is
-    tried *first*, then the rest of `provider_chain` in its configured
-    order as fallback. Without an override, `provider_chain` is tried as-is.
-
-    For each candidate, in order:
-
-    1. Skip if excluded, disabled, or not registered (`registry.get()`).
-    2. Resolve a model slug via `model_map.resolve_model()` — skip if this
-       provider isn't configured to serve this request's tier/type at all.
-    3. Capability gate via `capability.get()` — skip if the request needs
-       tools/vision this provider+model doesn't support, or if the
-       estimated input would exceed 90% of its context window.
-    4. Key availability via `registry.get_key_pool().pick_key()` — skip if
-       every key for this provider is currently rate-limited/cooling/
-       circuit-open.
-
-    The first candidate that survives all four checks wins. Returns
-    ``None`` if no candidate in the entire chain can serve the request.
+    Pick the best available (provider, api_key, key_index) for *request*.
 
     Parameters
     ----------
+    request:
+        The classified request being routed.
     exclude:
-        Provider names to skip outright — used by callers retrying after a
-        provider-side failure mid-stream, to avoid immediately re-selecting
-        the same provider that just failed.
-    """
-    from clasp.config.settings import get_settings
+        Provider names to skip outright (e.g. the provider that just 429'd,
+        when this is called from the absorber's immediate-failover branch).
+    config:
+        Routing configuration. If omitted, falls back to a permissive
+        default built purely from whatever is registered in *registry*
+        (every registered provider, in registry order, treated as
+        enabled) — see `_default_config()`. This keeps `select()` callable
+        with zero pydantic dependency when no config is supplied, which
+        matters because `providers.base.BaseProvider.stream()` calls
+        `queue.absorber.on_upstream_429()` — and therefore this function —
+        with no injected config at all, matching plan.md §11's literal
+        `provider.stream(request, key=key, key_index=key_idx)` call shape.
+    registry:
+        Provider registry to query. Defaults to the process-wide singleton.
+    cooldown_mgr:
+        Cooldown tracker to consult. Defaults to the process-wide singleton.
 
-    settings = get_settings()
+    Returns
+    -------
+    `(provider, api_key, key_index)` on success, or `None` if no provider
+    in the chain can currently serve the request.
+    """
+    if registry is None:
+        from clasp.providers.registry import get_registry  # noqa: PLC0415
+
+        registry = get_registry()
+    if config is None:
+        config = _default_config(registry)
+    if cooldown_mgr is None:
+        cooldown_mgr = get_cooldown_manager()
+
     exclude = exclude or set()
 
-    # Build candidate order. by_type override goes first, if not excluded.
-    by_type = model_map._as_dict(getattr(settings.routing, "by_type", None))
-    override_value = by_type.get(request.type.value) or ""
-    override_name = override_value.split("/")[0] if override_value else ""
+    # ── Build candidate order: by_type override goes first ─────────────────
+    override_slug = config.by_type.get(request.type.value.lower(), "") or ""
+    override_name = override_slug.split("/")[0] if override_slug else ""
+
     if override_name and override_name not in exclude:
         candidates = [override_name] + [
-            p for p in settings.provider_chain if p != override_name
+            p for p in config.provider_chain if p != override_name
         ]
     else:
-        candidates = list(settings.provider_chain)
-
-    logger.debug("selector: evaluating candidates", request_id=request.request_id,
-                type=request.type.value, candidates=candidates, exclude=sorted(exclude))
+        candidates = list(config.provider_chain)
 
     for provider_name in candidates:
         if provider_name in exclude:
             continue
 
-        cfg = settings.providers.get(provider_name)
+        cfg = config.providers.get(provider_name)
         if not cfg or not cfg.enabled:
-            logger.debug("selector: skip (disabled/unconfigured)", provider=provider_name)
             continue
 
         provider = registry.get(provider_name)
         if not provider:
-            logger.debug("selector: skip (not registered)", provider=provider_name)
             continue
 
-        # Model resolution
-        model_slug = model_map.resolve_model(request, provider_name, settings)
-        if not model_slug:
-            logger.debug("selector: skip (no model mapping for this tier/type)",
-                         provider=provider_name, requested_model=request.model)
+        # Capability check — deferred to Sprint 5 (router/capability.py,
+        # router/model_map.py). Every registered provider is assumed capable
+        # for now.
+
+        # Health check: circuit breaker.
+        cb = registry.get_circuit_breaker(provider_name)
+        if cb is not None and not cb.is_closed():
+            logger.debug(
+                "selector: skipping provider, circuit open",
+                provider=provider_name,
+            )
             continue
 
-        # Capability check
-        caps = capability.get(provider_name, model_slug, settings)
-        if request.needs_tools and not caps.supports_tools:
-            logger.debug("selector: skip (needs tools, unsupported)", provider=provider_name,
-                         model_slug=model_slug)
+        # Key availability — Sprint-3 simplification: single key, index 0.
+        # Multi-key rotation (ratelimit/key_pool.py) lands in Sprint 4.
+        keys = registry.get_keys(provider_name)
+        if not keys:
             continue
-        if request.needs_vision and not caps.supports_vision:
-            logger.debug("selector: skip (needs vision, unsupported)", provider=provider_name,
-                         model_slug=model_slug)
-            continue
-        if request.estimated_tokens > caps.max_context_tokens * 0.9:
-            logger.debug("selector: skip (exceeds 90% of context window)", provider=provider_name,
-                         estimated_tokens=request.estimated_tokens,
-                         max_context_tokens=caps.max_context_tokens)
-            continue
+        key_idx = 0
+        api_key = keys[key_idx]
 
-        # Key availability
-        key_pool = registry.get_key_pool(provider_name)
-        if key_pool is None:
-            logger.debug("selector: skip (no key pool registered)", provider=provider_name)
+        if cooldown_mgr.is_cooling(provider_name, key_idx):
+            logger.debug(
+                "selector: skipping provider, key cooling",
+                provider=provider_name,
+                key_index=key_idx,
+            )
             continue
 
-        result = await key_pool.pick_key(request.estimated_tokens)
-        if result:
-            api_key, key_idx = result
-            logger.info("selector: selected", request_id=request.request_id,
-                       provider=provider_name, model_slug=model_slug, key_index=key_idx,
-                       type=request.type.value)
-            return provider, api_key, key_idx
+        bucket = registry.get_bucket(provider_name)
+        if bucket is not None:
+            if not await bucket.can_consume(request.estimated_tokens):
+                logger.debug(
+                    "selector: skipping provider, bucket exhausted",
+                    provider=provider_name,
+                )
+                continue
+            await bucket.consume(request.estimated_tokens)
 
-        logger.debug("selector: skip (no healthy key available)", provider=provider_name)
+        logger.debug(
+            "selector: selected provider",
+            provider=provider_name,
+            key_index=key_idx,
+        )
+        return provider, api_key, key_idx
 
-    logger.info("selector: no provider available", request_id=request.request_id,
-               type=request.type.value, candidates=candidates, exclude=sorted(exclude))
     return None
+
+
+def _default_config(registry: "ProviderRegistry") -> SelectorConfig:
+    """
+    Build a permissive default `SelectorConfig` purely from what's
+    registered in *registry*: every registered provider, in registry
+    (insertion) order, treated as enabled. No by-type overrides.
+
+    This is what `select()` falls back to when no explicit `config` is
+    supplied — which happens whenever `providers.base.BaseProvider.stream()`
+    calls through to the absorber on a 429, since that call path passes no
+    config at all. Production code that *does* have a real `Settings`
+    object available (server.py's `build_selector_config()`, and eventually
+    `api/service.py` per plan.md §20 step 42) should build and pass a real
+    `SelectorConfig` instead of relying on this fallback.
+    """
+    names = registry.provider_names()
+    return SelectorConfig(
+        provider_chain=names,
+        providers={name: ProviderEnableConfig(enabled=True) for name in names},
+    )

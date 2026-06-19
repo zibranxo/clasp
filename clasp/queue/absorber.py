@@ -1,179 +1,129 @@
 """
 clasp/queue/absorber.py
-The 429 Absorber — the most important file in the project (P2: Never propagate 429).
 
-``on_upstream_429()`` is called by ``providers/base.py`` whenever an upstream
-provider responds with HTTP 429.  It:
+The 429 absorber — plan.md §11's core product differentiator. When a
+provider returns a 429, this is what stands between that failure and
+Claude Code ever seeing it.
 
-  1. Updates cooldown + circuit-breaker state for the failed (provider, key).
-  2. Tries immediate failover via ``selector.select(exclude={failed_provider})``.
-  3. If failover succeeds: streams the failover response transparently.
-  4. If no failover available: enqueues the request and yields SSE keep-alive
-     comments until a provider recovers (or timeout → yields an error event).
+Three-step strategy, in order:
+  1. Record the failure (cooldown timer + circuit breaker).
+  2. Try an immediate failover to the next healthy provider in the chain.
+  3. If nothing is immediately available, queue the request and hold the
+     SSE connection open with keep-alives until a provider recovers or the
+     configured max wait elapses (at which point — and *only* at which
+     point — the client finally sees a single `overloaded_error` event).
 
-Claude Code never sees a 429.  It either sees a slightly-delayed response or
-an "overloaded_error" event (if all providers stay rate-limited past the queue
-timeout).
-
-All dependencies are injected so the function is unit-testable without any
-real network or global state.
+`on_upstream_429()` is an async generator: callers (chiefly
+`providers.base.BaseProvider.stream()`) drain it with `async for chunk in
+on_upstream_429(...): yield chunk`.
 """
 
 from __future__ import annotations
 
 import asyncio
 import time
-from typing import Any, AsyncGenerator, Callable, Optional, Awaitable
+from collections.abc import AsyncGenerator
+from typing import TYPE_CHECKING
 
-from clasp.ratelimit.cooldown import CooldownStore, get_cooldown_store
-from clasp.ratelimit.circuit_breaker import CircuitBreakerStore, get_cb_store
-from clasp.queue.sse_hold import hold_until_resolved, DEFAULT_KEEPALIVE_INTERVAL
-from clasp.queue.manager import QueueManager, QueuedRequest, get_queue_manager
+from loguru import logger
 
+from clasp.queue import sse_hold
+from clasp.queue.manager import QueuedRequest, QueueManager, get_queue_manager
+from clasp.ratelimit.cooldown import CooldownManager, get_cooldown_manager
+from clasp.router import selector
+from clasp.router.types import AnthropicRequest, SelectorConfig
 
-# Selector signature: async (request, exclude=None, **kwargs) → (provider, key, idx) | None
-SelectorFn = Callable[..., Awaitable[Optional[tuple[Any, str, int]]]]
+if TYPE_CHECKING:
+    from clasp.providers.registry import ProviderRegistry
 
 
 async def on_upstream_429(
-    request: Any,
+    request: AnthropicRequest,
     failed_provider: str,
     failed_key_index: int,
-    retry_after_header: Optional[str],
+    retry_after_header: str | None,
     *,
-    # Injected dependencies (use module globals when None)
-    cooldown_store: Optional[CooldownStore] = None,
-    cb_store: Optional[CircuitBreakerStore] = None,
-    selector_fn: Optional[SelectorFn] = None,
-    queue_mgr: Optional[QueueManager] = None,
-    max_queue_wait_seconds: float = 120.0,
-    keepalive_interval: float = DEFAULT_KEEPALIVE_INTERVAL,
-    # Extra kwargs forwarded to selector_fn (provider_chain, instances, etc.)
-    selector_kwargs: Optional[dict[str, Any]] = None,
-) -> AsyncGenerator[bytes, None]:
+    config: SelectorConfig | None = None,
+    registry: "ProviderRegistry | None" = None,
+    cooldown_mgr: CooldownManager | None = None,
+    queue_mgr: QueueManager | None = None,
+    keepalive_interval_seconds: float = 15.0,
+) -> AsyncGenerator[str, None]:
     """
-    Handle an upstream 429 response without propagating it to Claude Code.
+    Handle a 429 from `failed_provider`/`failed_key_index` for `request`,
+    yielding Anthropic-format SSE chunks for whatever ultimately resolves
+    the request (a failover response, a delayed response, or — as a last
+    resort — a single error event).
 
-    Yields SSE bytes — either response chunks from a failover provider, keep-alive
-    comment lines while queued, or an Anthropic error event on final timeout.
-
-    Parameters
-    ----------
-    request:
-        The original request object/dict being proxied.
-    failed_provider:
-        Name of the provider that returned 429.
-    failed_key_index:
-        Index of the API key within that provider's key list.
-    retry_after_header:
-        Value of the ``Retry-After`` response header, if present.
-    cooldown_store, cb_store:
-        Rate-limit state stores.  Defaults to module-level singletons.
-    selector_fn:
-        Provider selection callable.  Defaults to ``router.selector.select``.
-    queue_mgr:
-        Queue manager instance.  Defaults to the module-level singleton.
-    max_queue_wait_seconds:
-        Maximum time a request may wait in the queue before a timeout error
-        event is emitted.
-    keepalive_interval:
-        Seconds between SSE keep-alive comments (default 15 s; reduce in tests).
-    selector_kwargs:
-        Extra keyword arguments forwarded to ``selector_fn`` (e.g.
-        ``provider_chain``, ``provider_instances``, ``provider_keys``, etc.)
+    Injectable collaborators (`config`, `registry`, `cooldown_mgr`,
+    `queue_mgr`) default to the process-wide singletons in production; tests
+    pass their own isolated instances so each test run is independent of
+    global state and of other tests.
     """
+    if registry is None:
+        from clasp.providers.registry import get_registry  # noqa: PLC0415
 
-    # ------------------------------------------------------------------
-    # 1. Update state for the failed (provider, key)
-    # ------------------------------------------------------------------
-    cd = cooldown_store or get_cooldown_store()
-    cb = cb_store or get_cb_store()
-    selector_kwargs = selector_kwargs or {}
+        registry = get_registry()
+    if cooldown_mgr is None:
+        cooldown_mgr = get_cooldown_manager()
+    if queue_mgr is None:
+        queue_mgr = get_queue_manager()
 
-    cd.on_429(failed_provider, failed_key_index, retry_after_header)
-    cb.get(failed_provider, failed_key_index).record_429()
+    # ── 1. Update state ─────────────────────────────────────────────────
+    wait_s = cooldown_mgr.on_429(failed_provider, failed_key_index, retry_after_header)
+    cb = registry.get_circuit_breaker(failed_provider)
+    if cb is not None:
+        cb.record_429()
 
-    try:
-        from loguru import logger  # type: ignore[import]
-        logger.warning(
-            "Upstream 429 received",
-            provider=failed_provider,
-            key_index=failed_key_index,
-            retry_after=retry_after_header,
-        )
-    except ImportError:
-        pass
+    logger.warning(
+        "absorbing upstream 429",
+        provider=failed_provider,
+        key_index=failed_key_index,
+        cooldown_seconds=wait_s,
+    )
 
-    # ------------------------------------------------------------------
-    # 2. Immediate failover — try another provider/key right now
-    # ------------------------------------------------------------------
-    if selector_fn is None:
-        from clasp.router.selector import select as _default_select
-        selector_fn = _default_select
-
-    selection = await selector_fn(
+    # ── 2. Immediate failover ───────────────────────────────────────────
+    selection = await selector.select(
         request,
         exclude={failed_provider},
-        cooldown_store=cd,
-        cb_store=cb,
-        **selector_kwargs,
+        config=config,
+        registry=registry,
+        cooldown_mgr=cooldown_mgr,
     )
-
-    if selection is not None:
-        provider, api_key, key_idx = selection
-        try:
-            from loguru import logger  # type: ignore[import]
-            logger.info(
-                "Immediate failover",
-                from_provider=failed_provider,
-                to_provider=getattr(provider, "name", str(provider)),
-                key_index=key_idx,
-            )
-        except ImportError:
-            pass
-
-        async for chunk in provider.stream(request, key=api_key, key_index=key_idx):
-            yield chunk if isinstance(chunk, bytes) else chunk.encode()
+    if selection:
+        provider, key, key_idx = selection
+        logger.info(
+            "immediate failover succeeded",
+            from_provider=failed_provider,
+            to_provider=provider.provider_name,
+        )
+        async for chunk in provider.stream(request, key=key, key_index=key_idx):
+            yield chunk
         return
 
-    # ------------------------------------------------------------------
-    # 3. No failover available — enqueue and hold the SSE connection open
-    # ------------------------------------------------------------------
-    try:
-        from loguru import logger  # type: ignore[import]
-        logger.warning(
-            "No failover available — queuing request",
-            failed_provider=failed_provider,
+    # ── 3. No failover — queue and hold the SSE connection open ────────
+    logger.warning(
+        "no immediate failover available, queueing request",
+        priority=request.priority,
+    )
+    loop = asyncio.get_running_loop()
+    future: "asyncio.Future" = loop.create_future()
+    await queue_mgr.enqueue(
+        QueuedRequest(
+            request=request,
+            future=future,
+            priority=request.priority,
+            enqueued_at=time.monotonic(),
         )
-    except ImportError:
-        pass
-
-    loop = asyncio.get_event_loop()
-    future: asyncio.Future = loop.create_future()
-
-    priority = getattr(request, "priority", 0)
-
-    queued = QueuedRequest(
-        request=request,
-        future=future,
-        priority=priority,
-        enqueued_at=time.monotonic(),
     )
 
-    mgr = queue_mgr or get_queue_manager()
-    if mgr is None:
-        # Queue not initialised — yield error immediately.
-        from clasp.queue.sse_hold import _error_event
-        yield _error_event(
-            "All providers rate-limited and no queue available. Try again shortly."
-        )
-        return
+    max_wait = (
+        config.max_queue_wait_seconds if config is not None else queue_mgr.max_wait_seconds
+    )
 
-    await mgr.enqueue(queued)
-
-    async for chunk in hold_until_resolved(
+    async for chunk in sse_hold.hold_until_resolved(
         future,
-        max_queue_wait_seconds,
-        keepalive_interval=keepalive_interval,
+        max_wait,
+        keepalive_interval_seconds=keepalive_interval_seconds,
     ):
         yield chunk

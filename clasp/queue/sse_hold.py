@@ -1,17 +1,16 @@
 """
 clasp/queue/sse_hold.py
-SSE hold-open: emit keep-alive comments until a Future resolves, then
-forward the buffered response chunks.
 
-Protocol detail:
-  - Keep-alive lines are SSE comment lines (": ...\\n\\n") which Anthropic's
-    client ignores but which prevent proxy timeout / connection drops.
-  - On timeout: yield an Anthropic ``error`` event so Claude Code can surface
-    a useful message rather than a silent hang.
-  - On future exception: yield an Anthropic ``error`` event.
-  - On future result (list[bytes]): yield each chunk as-is (already Anthropic SSE).
+Keeps an SSE connection alive while a queued request waits for a provider
+to become available, per plan.md §11.
 
-No external dependencies — pure asyncio.
+While `future` is unresolved, this yields a `: keep-alive elapsed=Ns\n\n`
+SSE comment line every `keepalive_interval_seconds` so Claude Code's HTTP
+client (and any intermediate proxies) don't time out the connection. Once
+`max_wait` total seconds have elapsed with no resolution, it yields a single
+Anthropic-shaped `overloaded_error` event and stops — that's the *only*
+error a client should ever see from the queueing path; everything else is
+either a real response or continued silence-with-keepalives.
 """
 
 from __future__ import annotations
@@ -19,80 +18,67 @@ from __future__ import annotations
 import asyncio
 import json
 import time
-from typing import AsyncGenerator
-
-# Default keep-alive interval. Override per-call for tests.
-DEFAULT_KEEPALIVE_INTERVAL = 15.0
+from collections.abc import AsyncGenerator
 
 
 async def hold_until_resolved(
-    future: asyncio.Future,
-    max_wait_seconds: float,
+    future: "asyncio.Future",
+    max_wait: float,
     *,
-    keepalive_interval: float = DEFAULT_KEEPALIVE_INTERVAL,
-) -> AsyncGenerator[bytes, None]:
+    keepalive_interval_seconds: float = 15.0,
+) -> AsyncGenerator[str, None]:
     """
-    Async generator that holds an SSE connection open until *future* is done.
+    Yield SSE keep-alive comments until *future* resolves or *max_wait*
+    seconds elapse, then yield either the resolved chunks or a single
+    Anthropic-shaped error event.
 
-    Yields
-    ------
-    bytes
-        SSE-formatted bytes:
-          - Keep-alive comment lines (": keep-alive elapsed=Ns\\n\\n") every
-            *keepalive_interval* seconds.
-          - Response chunks (list[bytes]) from ``future.result()`` on success.
-          - An Anthropic ``error`` event on timeout or exception.
+    Parameters
+    ----------
+    future:
+        Resolves to a `list[str]` of SSE chunks (set by the queue drain
+        task) or has an exception set on it.
+    max_wait:
+        Total seconds to wait before giving up and yielding an error event.
+    keepalive_interval_seconds:
+        How often to check in / emit a keep-alive comment while waiting.
+        Defaults to 15s per plan.md §11; tests may pass a smaller value to
+        make the keep-alive behavior observable without a long real wait.
     """
     start = time.monotonic()
-
     while not future.done():
-        wait_left = max(0.0, max_wait_seconds - (time.monotonic() - start))
-        if wait_left <= 0:
-            # Timeout exceeded — yield error and return.
-            yield _error_event("All providers rate-limited. Try again shortly.")
-            future.cancel()
-            return
-
-        # Wait up to keepalive_interval for the future to resolve.
         try:
             await asyncio.wait_for(
-                asyncio.shield(future),
-                timeout=min(keepalive_interval, wait_left),
+                asyncio.shield(future), timeout=keepalive_interval_seconds
             )
         except asyncio.TimeoutError:
             elapsed = int(time.monotonic() - start)
-            # Check overall timeout AFTER emitting keep-alive (so at least
-            # one keep-alive is visible before the error event).
-            if time.monotonic() - start >= max_wait_seconds:
+            yield f": keep-alive elapsed={elapsed}s\n\n"
+            if time.monotonic() - start > max_wait:
                 yield _error_event("All providers rate-limited. Try again shortly.")
-                future.cancel()
                 return
-            yield f": keep-alive elapsed={elapsed}s\n\n".encode()
-        except asyncio.CancelledError:
-            return
+        except Exception:  # noqa: BLE001
+            # The future itself completed with an exception while we were
+            # waiting on it (e.g. the queue manager's own max-wait check in
+            # drain_task fired concurrently with ours and called
+            # future.set_exception()). asyncio.wait_for re-raises a shielded
+            # future's exception immediately rather than waiting for the
+            # next `future.done()` check, so it lands here instead of in
+            # the TimeoutError branch above. Fall through to the same
+            # `future.exception()` handling below by simply breaking — the
+            # `while not future.done()` condition is now False, since the
+            # future is in fact done (just done with an exception).
+            break
 
-    # Future is done — check result.
-    if future.cancelled():
+    if future.exception():
+        yield _error_event(str(future.exception()))
         return
 
-    exc = future.exception()
-    if exc is not None:
-        yield _error_event(str(exc))
-        return
-
-    # Success — forward the buffered chunks.
-    chunks: list[bytes] = future.result()
-    for chunk in chunks:
+    for chunk in future.result():
         yield chunk
 
 
-def _error_event(message: str) -> bytes:
-    """Build an Anthropic SSE error event."""
-    payload = json.dumps({
-        "type": "error",
-        "error": {
-            "type": "overloaded_error",
-            "message": message,
-        },
-    })
-    return f"event: error\ndata: {payload}\n\n".encode()
+def _error_event(msg: str) -> str:
+    payload = json.dumps(
+        {"type": "error", "error": {"type": "overloaded_error", "message": msg}}
+    )
+    return f"event: error\ndata: {payload}\n\n"

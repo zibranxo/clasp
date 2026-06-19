@@ -1,116 +1,207 @@
 """
 tests/integration/test_absorber.py
-Integration tests for clasp/queue/absorber.py.
 
-Run with:
-    python3 -m unittest tests/integration/test_absorber.py -v
+Integration tests for the 429 absorber pipeline.
 
-No external dependencies (pytest, httpx, etc.) — pure stdlib asyncio +
-unittest.IsolatedAsyncioTestCase.
-
-Tests
------
+Tested scenarios
+----------------
 1. test_immediate_failover_on_429
-   Primary 429s → secondary healthy → response from secondary, no error event.
+   Primary 429s → absorber tries selector.select(exclude={primary}) →
+   secondary is healthy → response comes from secondary, no error event,
+   no keep-alive events (resolved without ever touching the queue).
 
 2. test_queue_and_hold_when_all_cooling
-   All providers cooling → request queued → keep-alive events emitted →
-   provider recovers after 2 s → response arrives with no error event.
+   Both providers cooling at request time → request is queued →
+   keep-alive events emitted while waiting → secondary provider recovers
+   after 2 s → drain_task dispatches → response eventually arrives, no
+   error event.
 
 3. test_queue_timeout
-   All providers cooling for 200 s with max_queue_wait_seconds=3 →
-   Anthropic error event arrives around the 3 s mark.
+   All providers cooling; max_queue_wait_seconds=3 →
+   hold_until_resolved()'s own per-keepalive check fires after 3 s →
+   a single Anthropic overloaded_error event arrives; total elapsed time
+   within [2.5 s, 6.0 s]; at least one keep-alive comment was emitted.
+
+Test design principles
+----------------------
+• Every test builds its own isolated (registry, cooldown_mgr, queue_mgr,
+  config) rather than touching process-wide singletons — on_upstream_429()
+  and select() both accept explicit injectable collaborators for exactly
+  this reason.
+
+• The fake catalog uses backoff_base_seconds=100 so on_429()'s scheduled
+  call_later(100, ...) never fires during a short test window.  asyncio.run()
+  creates a fresh event loop per test, so even if a stray call_later were
+  somehow scheduled it would be dropped when the loop closes.
+
+• keepalive_interval_seconds=0.1 is passed to on_upstream_429() to make
+  the keep-alive mechanism observable in tests without a 15-second wall-clock
+  wait.
+
+Run with: pytest tests/integration/test_absorber.py -v --asyncio-mode=auto
 """
 
 from __future__ import annotations
 
 import asyncio
 import json
-import sys
 import time
-import unittest
-from typing import Any, AsyncGenerator, Optional
-from unittest.mock import AsyncMock
+from collections.abc import AsyncGenerator, AsyncIterator
+from dataclasses import dataclass
+from typing import Any
 
-# Ensure the repo root is on sys.path so we can import clasp.*
-import os
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
+import pytest
 
+from clasp.api.detect import RequestType
+from clasp.providers.base import BaseProvider, UpstreamRateLimitError
+from clasp.providers.registry import ProviderRegistry
 from clasp.queue.absorber import on_upstream_429
-from clasp.queue.manager import QueueManager, QueuedRequest
-from clasp.ratelimit.cooldown import CooldownStore
-from clasp.ratelimit.circuit_breaker import CircuitBreakerStore
+from clasp.queue.manager import QueueManager
+from clasp.ratelimit.bucket import TokenBucket
+from clasp.ratelimit.circuit_breaker import CircuitBreaker
+from clasp.ratelimit.cooldown import CooldownManager
+from clasp.router.types import AnthropicRequest, ProviderEnableConfig, SelectorConfig
+
+pytestmark = pytest.mark.asyncio
 
 
 # ---------------------------------------------------------------------------
-# Helpers
+# Fake catalog — provider_a / provider_b are not real catalog entries;
+# backoff_base_seconds=100 ensures cooldown.on_429()'s call_later fires
+# well after each test completes so there's no cross-test state leakage.
 # ---------------------------------------------------------------------------
 
-def _decode_events(chunks: list[bytes]) -> list[dict]:
-    """
-    Parse a list of SSE byte chunks into a list of data dicts.
-    Returns only 'data:' lines that contain valid JSON.
-    """
-    events = []
-    for chunk in chunks:
-        text = chunk.decode(errors="replace")
-        for line in text.splitlines():
-            line = line.strip()
-            if line.startswith("data:"):
-                payload = line[5:].strip()
-                try:
-                    events.append(json.loads(payload))
-                except json.JSONDecodeError:
-                    pass
-    return events
+@dataclass(frozen=True)
+class _FakeProfile:
+    display_name: str
+    backoff_base_seconds: int = 100
+    cooldown_seconds: int = 100
 
 
-def _decode_raw(chunks: list[bytes]) -> str:
-    """Join all chunks to raw text for keep-alive inspection."""
-    return b"".join(chunks).decode(errors="replace")
-
-
-def _has_error_event(events: list[dict]) -> bool:
-    return any(e.get("type") == "error" for e in events)
-
-
-def _has_text_content(events: list[dict]) -> bool:
-    return any(
-        e.get("type") == "content_block_delta"
-        and e.get("delta", {}).get("type") == "text_delta"
-        for e in events
-    )
+FAKE_CATALOG: dict[str, _FakeProfile] = {
+    "provider_a": _FakeProfile(display_name="Provider A"),
+    "provider_b": _FakeProfile(display_name="Provider B"),
+}
 
 
 # ---------------------------------------------------------------------------
-# Fake provider that yields canned Anthropic SSE chunks
+# Fake provider implementations
 # ---------------------------------------------------------------------------
 
-_SECONDARY_CHUNKS = [
-    b'event: message_start\ndata: {"type":"message_start","message":{"id":"msg_sec","type":"message","role":"assistant","content":[],"model":"failover-model","stop_reason":null,"usage":{"input_tokens":10,"output_tokens":0}}}\n\n',
-    b'event: content_block_start\ndata: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}\n\n',
-    b'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hello from secondary."}}\n\n',
-    b'event: content_block_stop\ndata: {"type":"content_block_stop","index":0}\n\n',
-    b'event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":4}}\n\n',
-    b'event: message_stop\ndata: {"type":"message_stop"}\n\n',
-]
+class HealthyProvider(BaseProvider):
+    """Streams a fixed list of pre-built SSE chunks without error."""
 
+    def __init__(self, name: str, response_chunks: list[str]) -> None:
+        self.provider_name = name
+        self._chunks = response_chunks
+        self.call_count = 0
 
-class FakeProvider:
-    """A provider that always yields _SECONDARY_CHUNKS successfully."""
-
-    name = "fake_secondary"
-
-    async def stream(self, request, *, key, key_index=0, **kwargs):
-        for chunk in _SECONDARY_CHUNKS:
+    async def _stream_raw(
+        self, request: AnthropicRequest, key: str, key_index: int
+    ) -> AsyncGenerator[str, None]:
+        self.call_count += 1
+        for chunk in self._chunks:
             yield chunk
 
 
-async def _collect(gen: AsyncGenerator) -> list[bytes]:
-    """Collect all bytes from an async generator."""
-    chunks = []
-    async for chunk in gen:
-        chunks.append(chunk)
+class RateLimitedProvider(BaseProvider):
+    """Always raises UpstreamRateLimitError — every call is a 429."""
+
+    def __init__(self, name: str) -> None:
+        self.provider_name = name
+        self.call_count = 0
+
+    async def _stream_raw(
+        self, request: AnthropicRequest, key: str, key_index: int
+    ) -> AsyncGenerator[str, None]:
+        self.call_count += 1
+        raise UpstreamRateLimitError(retry_after=None)
+        yield  # Never reached; makes this function an async generator
+
+
+# ---------------------------------------------------------------------------
+# SSE chunk helpers — keep tests readable
+# ---------------------------------------------------------------------------
+
+_MSG_STOP_CHUNK = 'event: message_stop\ndata: {"type":"message_stop"}\n\n'
+
+def _text_chunk(text: str) -> str:
+    """Build a minimal text-content-block SSE chunk."""
+    data = json.dumps({"type": "content_block_delta",
+                       "delta": {"type": "text_delta", "text": text}})
+    return f"event: content_block_delta\ndata: {data}\n\n"
+
+
+def _is_error_event(chunk: str) -> bool:
+    return "overloaded_error" in chunk
+
+def _is_keepalive(chunk: str) -> bool:
+    return chunk.startswith(": keep-alive")
+
+def _is_response_chunk(chunk: str) -> bool:
+    return not _is_keepalive(chunk) and not _is_error_event(chunk)
+
+
+# ---------------------------------------------------------------------------
+# Test fixture builders
+# ---------------------------------------------------------------------------
+
+def _make_request() -> AnthropicRequest:
+    body = {
+        "model": "claude-sonnet-4-6",
+        "max_tokens": 100,
+        "messages": [{"role": "user", "content": "hello"}],
+    }
+    return AnthropicRequest(
+        body=body,
+        type=RequestType.INTERACTIVE,
+        priority=0,
+        estimated_tokens=10,
+    )
+
+
+def _make_registry(
+    providers: dict[str, tuple[BaseProvider, list[str]]],
+) -> ProviderRegistry:
+    registry = ProviderRegistry()
+    for name, (provider, keys) in providers.items():
+        profile = FAKE_CATALOG[name]
+        bucket = TokenBucket(rpm_limit=1000, tpm_limit=None, soft_threshold=1.0)
+        cb = CircuitBreaker(profile)
+        registry.register(
+            name,
+            provider=provider,
+            bucket=bucket,
+            circuit_breaker=cb,
+            keys=keys,
+        )
+    return registry
+
+
+def _make_config(
+    chain: list[str],
+    *,
+    max_wait: float = 30.0,
+) -> SelectorConfig:
+    return SelectorConfig(
+        provider_chain=chain,
+        providers={n: ProviderEnableConfig(enabled=True) for n in chain},
+        max_queue_wait_seconds=max_wait,
+    )
+
+
+async def _collect(
+    agen: AsyncIterator[str],
+    timeout_s: float = 10.0,
+) -> list[str]:
+    """Drain an async generator into a list, with a hard test-level timeout."""
+    chunks: list[str] = []
+
+    async def _drain() -> None:
+        async for chunk in agen:
+            chunks.append(chunk)
+
+    await asyncio.wait_for(_drain(), timeout=timeout_s)
     return chunks
 
 
@@ -118,309 +209,260 @@ async def _collect(gen: AsyncGenerator) -> list[bytes]:
 # Test 1 — Immediate failover on 429
 # ---------------------------------------------------------------------------
 
-class TestImmediateFailoverOn429(unittest.IsolatedAsyncioTestCase):
+async def test_immediate_failover_on_429():
     """
-    Primary provider returns 429.
-    Secondary provider is healthy.
-    Expected: response arrives from secondary; no error event; no 429 visible.
+    Primary 429s → absorber excludes primary → secondary is healthy →
+    response comes from secondary.  No error events, no keep-alive events
+    (the request never touches the priority queue).
     """
+    provider_b_chunks = [
+        _text_chunk("Hello from provider_b!"),
+        _msg_stop_chunk := _MSG_STOP_CHUNK,
+    ]
 
-    async def test_immediate_failover_on_429(self):
-        cd = CooldownStore()
-        cb = CircuitBreakerStore()
+    provider_a = RateLimitedProvider("provider_a")
+    provider_b = HealthyProvider("provider_b", provider_b_chunks)
 
-        secondary = FakeProvider()
+    registry = _make_registry({
+        "provider_a": (provider_a, ["key_a_0"]),
+        "provider_b": (provider_b, ["key_b_0"]),
+    })
+    cooldown_mgr = CooldownManager(catalog=FAKE_CATALOG)
+    queue_mgr = QueueManager(max_wait_seconds=30.0)
+    config = _make_config(["provider_a", "provider_b"])
+    request = _make_request()
 
-        # selector: exclude={"primary"} → returns secondary; exclude=None → returns primary (irrelevant here)
-        async def selector_fn(request, exclude=None, **kwargs):
-            exclude = exclude or set()
-            if "primary" not in exclude:
-                return None  # would return primary but we're after failover
-            return (secondary, "secondary-key", 0)
-
-        request = {"model": "claude-3-5-sonnet-20241022", "messages": []}
-
-        chunks = await _collect(on_upstream_429(
-            request,
-            failed_provider="primary",
+    # provider_a has just returned a 429; absorber is invoked.
+    chunks = await _collect(
+        on_upstream_429(
+            request=request,
+            failed_provider="provider_a",
             failed_key_index=0,
-            retry_after_header="30",
-            cooldown_store=cd,
-            cb_store=cb,
-            selector_fn=selector_fn,
-            queue_mgr=None,  # Should not reach queue
-            max_queue_wait_seconds=5.0,
-            keepalive_interval=1.0,
-        ))
-
-        # 1. Cooldown was set for primary.
-        self.assertTrue(
-            cd.is_cooling("primary", 0),
-            "Primary provider should be in cooldown after 429",
-        )
-
-        # 2. Chunks are non-empty.
-        self.assertTrue(chunks, "Expected response chunks from failover provider")
-
-        # 3. Events contain content from secondary.
-        events = _decode_events(chunks)
-        raw = _decode_raw(chunks)
-
-        # 4. No error event.
-        self.assertFalse(
-            _has_error_event(events),
-            f"Unexpected error event in response: {events}",
-        )
-
-        # 5. Has text content from secondary.
-        self.assertTrue(
-            _has_text_content(events),
-            f"Expected text_delta content from secondary provider. Got: {events}",
-        )
-
-        # 6. No keep-alive lines (failover should be immediate).
-        self.assertNotIn(
-            "keep-alive",
-            raw,
-            "No keep-alive should appear on immediate failover",
-        )
-
-        # 7. No 429-related fields in any event.
-        for event in events:
-            self.assertNotEqual(
-                event.get("type"),
-                "error",
-                f"Got error event: {event}",
-            )
-
-    async def test_cooldown_state_updated_for_failed_provider(self):
-        """Cooldown and circuit breaker are updated even if failover succeeds."""
-        cd = CooldownStore()
-        cd.set_backoff_base("primary", 60.0)
-        cb = CircuitBreakerStore()
-        secondary = FakeProvider()
-
-        async def selector_fn(request, exclude=None, **kwargs):
-            if exclude and "primary" in exclude:
-                return (secondary, "k", 0)
-            return None
-
-        await _collect(on_upstream_429(
-            {"messages": []},
-            failed_provider="primary",
-            failed_key_index=1,
             retry_after_header=None,
-            cooldown_store=cd,
-            cb_store=cb,
-            selector_fn=selector_fn,
-        ))
-
-        self.assertTrue(cd.is_cooling("primary", 1))
-        # CB should have recorded a 429 for primary key 1.
-        breaker = cb.get("primary", 1)
-        # One 429 recorded — not yet tripped (threshold is 3).
-        from clasp.ratelimit.circuit_breaker import CBState
-        self.assertEqual(breaker.state, CBState.CLOSED)
-
-
-# ---------------------------------------------------------------------------
-# Test 2 — Queue and hold when all cooling, then recover
-# ---------------------------------------------------------------------------
-
-class TestQueueAndHoldWhenAllCooling(unittest.IsolatedAsyncioTestCase):
-    """
-    All providers cooling → request queued → keep-alive events emitted →
-    provider recovers after ~2 s → response eventually arrives.
-    """
-
-    async def test_queue_and_hold_when_all_cooling(self):
-        cd = CooldownStore()
-        cb = CircuitBreakerStore()
-
-        secondary = FakeProvider()
-        healthy_at = asyncio.get_event_loop().time() + 2.0  # recover in 2 s
-
-        call_count = {"n": 0}
-
-        async def selector_fn(request, exclude=None, **kwargs):
-            call_count["n"] += 1
-            now = asyncio.get_event_loop().time()
-            if now >= healthy_at:
-                return (secondary, "secondary-key", 0)
-            return None  # all cooling
-
-        request = {"model": "claude-3-5-sonnet-20241022", "messages": [], "priority": 0}
-
-        mgr = QueueManager(
-            selector_fn=selector_fn,
-            max_wait_seconds=15.0,
-            drain_poll_interval=0.3,  # fast polling for test
+            config=config,
+            registry=registry,
+            cooldown_mgr=cooldown_mgr,
+            queue_mgr=queue_mgr,
+            keepalive_interval_seconds=0.1,
         )
+    )
 
-        # Start drain task as a background task.
-        drain = asyncio.create_task(mgr.drain_task(), name="test_drain")
+    # ── Assertions ─────────────────────────────────────────────────────────
+    assert chunks, "expected at least one chunk from provider_b"
 
-        start = time.monotonic()
-        chunks = await asyncio.wait_for(
-            _collect(on_upstream_429(
-                request,
-                failed_provider="primary",
+    # No 429 / overloaded_error should ever reach the client.
+    error_chunks = [c for c in chunks if _is_error_event(c)]
+    assert not error_chunks, f"unexpected error events: {error_chunks}"
+
+    # No keep-alive comments — failover was immediate, queue was never used.
+    keepalive_chunks = [c for c in chunks if _is_keepalive(c)]
+    assert not keepalive_chunks, f"unexpected keep-alive events: {keepalive_chunks}"
+
+    # The content should match exactly what HealthyProvider("provider_b", …) yields.
+    response_chunks = [c for c in chunks if _is_response_chunk(c)]
+    assert response_chunks == provider_b_chunks, (
+        f"response content mismatch:\ngot:      {response_chunks}\n"
+        f"expected: {provider_b_chunks}"
+    )
+
+    # Sanity: provider_a itself was never called for streaming (we only reported
+    # its 429 to absorber — the actual UpstreamRateLimitError came from its
+    # _stream_raw, which caller simulated by invoking on_upstream_429 directly).
+    assert provider_b.call_count == 1, (
+        f"expected provider_b.call_count==1, got {provider_b.call_count}"
+    )
+
+    # provider_a is now cooling (recorded via cooldown_mgr.on_429()).
+    assert cooldown_mgr.is_cooling("provider_a", 0), (
+        "provider_a should be marked as cooling after its 429"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Test 2 — Queue-and-hold when all providers are cooling
+# ---------------------------------------------------------------------------
+
+async def test_queue_and_hold_when_all_cooling():
+    """
+    Both providers cooling → request is queued → keep-alive SSE comments are
+    emitted while waiting → provider_b recovers after 2 s → drain_task
+    dispatches → response eventually arrives, no error event.
+    """
+    provider_b_chunks = [
+        _text_chunk("Delayed response from provider_b"),
+        _MSG_STOP_CHUNK,
+    ]
+    provider_b = HealthyProvider("provider_b", provider_b_chunks)
+    # provider_a failed with a 429 before this call; provider_b is cooling too.
+    provider_a = RateLimitedProvider("provider_a")
+
+    registry = _make_registry({
+        "provider_a": (provider_a, ["key_a_0"]),
+        "provider_b": (provider_b, ["key_b_0"]),
+    })
+    cooldown_mgr = CooldownManager(catalog=FAKE_CATALOG)
+    queue_mgr = QueueManager(max_wait_seconds=30.0)
+    config = _make_config(["provider_a", "provider_b"], max_wait=30.0)
+    request = _make_request()
+
+    # Pre-mark provider_b as cooling (its own upstream 429 happened earlier).
+    # Use a 200 s duration so it stays cooling for the duration of the test.
+    cooldown_mgr._set_cooling("provider_b", 0, time.monotonic() + 200.0)
+    # provider_a will be marked cooling by on_upstream_429() → cooldown_mgr.on_429().
+
+    # Start the drain task.
+    drain = asyncio.create_task(
+        queue_mgr.drain_task(
+            config=config,
+            registry=registry,
+            cooldown_mgr=cooldown_mgr,
+        )
+    )
+
+    # Concurrent task: re-enable provider_b after 2 s.
+    async def _re_enable_b() -> None:
+        await asyncio.sleep(2.0)
+        cooldown_mgr._re_enable("provider_b", 0)
+
+    re_enable_task = asyncio.create_task(_re_enable_b())
+
+    try:
+        t0 = time.monotonic()
+        chunks = await _collect(
+            on_upstream_429(
+                request=request,
+                failed_provider="provider_a",
                 failed_key_index=0,
                 retry_after_header=None,
-                cooldown_store=cd,
-                cb_store=cb,
-                selector_fn=selector_fn,
-                queue_mgr=mgr,
-                max_queue_wait_seconds=15.0,
-                keepalive_interval=0.5,   # fast keep-alive for test
-            )),
-            timeout=10.0,   # overall test guard
+                config=config,
+                registry=registry,
+                cooldown_mgr=cooldown_mgr,
+                queue_mgr=queue_mgr,
+                keepalive_interval_seconds=0.1,
+            ),
+            timeout_s=10.0,
         )
-        elapsed = time.monotonic() - start
-
+        elapsed = time.monotonic() - t0
+    finally:
         drain.cancel()
-        try:
-            await drain
-        except asyncio.CancelledError:
-            pass
+        re_enable_task.cancel()
+        # Suppress CancelledError from awaiting the cancelled tasks.
+        await asyncio.gather(drain, re_enable_task, return_exceptions=True)
 
-        # 1. Took at least ~2 s (recovery delay).
-        self.assertGreaterEqual(
-            elapsed,
-            1.5,
-            f"Expected ~2s wait, got {elapsed:.2f}s",
-        )
+    # ── Assertions ─────────────────────────────────────────────────────────
 
-        # 2. Chunks are non-empty.
-        self.assertTrue(chunks, "Expected response chunks after queue recovery")
+    # No error events — the request resolved successfully.
+    error_chunks = [c for c in chunks if _is_error_event(c)]
+    assert not error_chunks, f"unexpected error events: {error_chunks}"
 
-        # 3. Keep-alive events were emitted (at least one in ~2 s with 0.5 s interval).
-        raw = _decode_raw(chunks)
-        self.assertIn(
-            "keep-alive",
-            raw,
-            "Expected at least one keep-alive comment while queued",
-        )
+    # At least one keep-alive comment should have been emitted while waiting.
+    keepalive_chunks = [c for c in chunks if _is_keepalive(c)]
+    assert keepalive_chunks, (
+        "expected at least one SSE keep-alive comment while waiting for "
+        "provider_b to recover, but got none"
+    )
 
-        # 4. No error event.
-        events = _decode_events(chunks)
-        self.assertFalse(
-            _has_error_event(events),
-            f"Unexpected error event after recovery: {events}",
-        )
+    # The actual response chunks should match provider_b's output.
+    response_chunks = [c for c in chunks if _is_response_chunk(c)]
+    assert response_chunks == provider_b_chunks, (
+        f"response content mismatch:\ngot:      {response_chunks}\n"
+        f"expected: {provider_b_chunks}"
+    )
 
-        # 5. Has text content from secondary.
-        self.assertTrue(
-            _has_text_content(events),
-            f"Expected text_delta content after recovery. Got: {events}",
-        )
-
-        # 6. Selector was called multiple times (evidence of polling).
-        self.assertGreater(
-            call_count["n"],
-            2,
-            f"Expected drain task to poll selector multiple times, got {call_count['n']}",
-        )
+    # Elapsed time should be ≥2 s (provider_b recovers after 2 s) and
+    # well under the 10 s collection timeout.
+    assert elapsed >= 1.8, f"resolved too fast ({elapsed:.2f}s) — provider_b should take ~2s"
+    assert elapsed < 8.0,  f"resolved too slowly ({elapsed:.2f}s) — something is stuck"
 
 
 # ---------------------------------------------------------------------------
-# Test 3 — Queue timeout
+# Test 3 — Queue timeout: error event arrives at the configured deadline
 # ---------------------------------------------------------------------------
 
-class TestQueueTimeout(unittest.IsolatedAsyncioTestCase):
+async def test_queue_timeout():
     """
-    All providers cooling for 200 s with max_queue_wait_seconds=3.
-    Expected: Anthropic error event arrives around the 3 s mark.
+    All providers cooling for effectively forever; max_queue_wait_seconds=3 →
+    hold_until_resolved()'s own per-keepalive-interval check fires after 3 s
+    → a single Anthropic overloaded_error event is yielded;
+    at least one keep-alive comment was emitted before that.
     """
+    provider_a = RateLimitedProvider("provider_a")
+    provider_b = RateLimitedProvider("provider_b")
 
-    async def test_queue_timeout(self):
-        cd = CooldownStore()
-        cb = CircuitBreakerStore()
+    registry = _make_registry({
+        "provider_a": (provider_a, ["key_a_0"]),
+        "provider_b": (provider_b, ["key_b_0"]),
+    })
+    cooldown_mgr = CooldownManager(catalog=FAKE_CATALOG)
+    queue_mgr = QueueManager(max_wait_seconds=3.0)
+    config = _make_config(["provider_a", "provider_b"], max_wait=3.0)
+    request = _make_request()
 
-        # Selector always returns None (all cooling forever).
-        async def selector_fn(request, exclude=None, **kwargs):
-            return None
+    # Pre-mark both providers as cooling for 200 s (effectively forever).
+    cooldown_mgr._set_cooling("provider_a", 0, time.monotonic() + 200.0)
+    cooldown_mgr._set_cooling("provider_b", 0, time.monotonic() + 200.0)
+    # on_upstream_429 will call on_429("provider_a", 0, None) which overwrites
+    # provider_a's cooling entry, but with backoff_base_seconds=100 the new
+    # cooldown is also effectively forever (100 * 2^0 = 100 s).
 
-        request = {"model": "claude-3-5-sonnet-20241022", "messages": []}
-
-        mgr = QueueManager(
-            selector_fn=selector_fn,
-            max_wait_seconds=3.0,
-            drain_poll_interval=0.5,
+    # Start drain_task so it's attempting to dispatch (and repeatedly failing).
+    drain = asyncio.create_task(
+        queue_mgr.drain_task(
+            config=config,
+            registry=registry,
+            cooldown_mgr=cooldown_mgr,
         )
-        drain = asyncio.create_task(mgr.drain_task(), name="test_drain_timeout")
+    )
 
-        start = time.monotonic()
-        chunks = await asyncio.wait_for(
-            _collect(on_upstream_429(
-                request,
-                failed_provider="primary",
+    try:
+        t0 = time.monotonic()
+        chunks = await _collect(
+            on_upstream_429(
+                request=request,
+                failed_provider="provider_a",
                 failed_key_index=0,
-                retry_after_header="200",  # tells system to wait 200 s
-                cooldown_store=cd,
-                cb_store=cb,
-                selector_fn=selector_fn,
-                queue_mgr=mgr,
-                max_queue_wait_seconds=3.0,
-                keepalive_interval=0.5,
-            )),
-            timeout=10.0,   # overall test guard
+                retry_after_header=None,
+                config=config,
+                registry=registry,
+                cooldown_mgr=cooldown_mgr,
+                queue_mgr=queue_mgr,
+                keepalive_interval_seconds=0.1,   # fast polling for test
+            ),
+            timeout_s=10.0,
         )
-        elapsed = time.monotonic() - start
-
+        elapsed = time.monotonic() - t0
+    finally:
         drain.cancel()
-        try:
-            await drain
-        except asyncio.CancelledError:
-            pass
+        await asyncio.gather(drain, return_exceptions=True)
 
-        # 1. Completed around 3 s (allow ±2 s window).
-        self.assertGreaterEqual(
-            elapsed,
-            2.0,
-            f"Expected ~3s before timeout, completed too fast: {elapsed:.2f}s",
-        )
-        self.assertLessEqual(
-            elapsed,
-            8.0,
-            f"Timeout took too long: {elapsed:.2f}s",
-        )
+    # ── Assertions ─────────────────────────────────────────────────────────
 
-        # 2. An error event is present.
-        events = _decode_events(chunks)
-        self.assertTrue(
-            _has_error_event(events),
-            f"Expected error event on timeout. Got events: {events}\nRaw: {_decode_raw(chunks)!r}",
-        )
+    # Exactly one error event — the overloaded_error at timeout.
+    error_chunks = [c for c in chunks if _is_error_event(c)]
+    assert len(error_chunks) == 1, (
+        f"expected exactly 1 error event, got {len(error_chunks)}: {error_chunks}"
+    )
+    assert "overloaded_error" in error_chunks[0], error_chunks[0]
 
-        # 3. The error type is overloaded_error.
-        error_events = [e for e in events if e.get("type") == "error"]
-        self.assertTrue(error_events, "No error events found")
-        err = error_events[0]
-        self.assertEqual(
-            err.get("error", {}).get("type"),
-            "overloaded_error",
-            f"Unexpected error type: {err}",
-        )
+    # No real response chunks.
+    response_chunks = [c for c in chunks if _is_response_chunk(c)]
+    assert not response_chunks, (
+        f"expected no response chunks on timeout, got: {response_chunks}"
+    )
 
-        # 4. Keep-alive events were emitted before timeout.
-        raw = _decode_raw(chunks)
-        self.assertIn(
-            "keep-alive",
-            raw,
-            "Expected keep-alive comments before timeout error",
-        )
+    # At least one keep-alive comment — the connection was held open.
+    keepalive_chunks = [c for c in chunks if _is_keepalive(c)]
+    assert keepalive_chunks, (
+        "expected at least one SSE keep-alive comment before the timeout "
+        "error event, but got none"
+    )
 
-        # 5. No text content (no provider responded).
-        self.assertFalse(
-            _has_text_content(events),
-            f"Did not expect text content on timeout: {events}",
-        )
-
-
-# ---------------------------------------------------------------------------
-# Entry point
-# ---------------------------------------------------------------------------
-
-if __name__ == "__main__":
-    unittest.main(verbosity=2)
+    # The error should arrive around the 3 s mark (generous ±3 s window).
+    assert elapsed >= 2.5, (
+        f"error arrived too early ({elapsed:.2f}s); "
+        "absorber should have kept the connection alive for ~3s before giving up"
+    )
+    assert elapsed < 6.0, (
+        f"error arrived too late ({elapsed:.2f}s); "
+        "absorber should have given up around the 3s max_queue_wait mark"
+    )

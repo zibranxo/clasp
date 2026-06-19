@@ -1,250 +1,107 @@
 """
 clasp/server.py
-FastAPI application factory for CLASP.
 
-Usage::
+FastAPI app factory for the CLASP proxy server.
 
-    from clasp.server import create_app
-    app = create_app()
+Startup responsibilities (via the lifespan context manager):
+  - Build the process-wide `SelectorConfig`, `ProviderRegistry`, and
+    `CooldownManager` that the routing/absorber pipeline shares.
+  - Start `QueueManager.drain_task()` as a background asyncio task so
+    requests queued by `queue.absorber.on_upstream_429()` (because every
+    provider was unavailable at the moment they arrived) get dispatched the
+    instant a provider recovers, without any caller having to poll.
+  - Cancel that background task cleanly on shutdown.
 
-Or via the uvicorn entry-point in cmd_server.py::
-
-    uvicorn clasp.server:create_app --factory ...
-
-Startup sequence:
-  1. Setup logging (before anything else logs).
-  2. Load & validate config.
-  3. Initialise provider registry.
-  4. Register all routers.
-  5. Add middleware (IPGuard, CORS for loopback).
-  6. Start background tasks:
-       • Config watcher (hot-reload on config.yaml changes).
-       • (Sprint 2+) Rate-limit bucket refill.
-       • (Sprint 3+) Queue drain task.
-       • (Sprint 7+) Rate-limit state persistence.
-
-Shutdown sequence:
-  1. Cancel background tasks.
-  2. (Sprint 7+) Flush rate-limit state to ratelimit.json.
-  3. Delete PID file.
-  4. Flush loguru queue.
+Anything not explicitly part of this task (mounting `internal/routes.py`,
+the `IPGuard` middleware, `config.watcher`'s hot-reload task, the static UI
+routes) is left as a clearly-marked follow-up — see the TODOs below — since
+those modules don't exist in this codebase yet.
 """
 
 from __future__ import annotations
 
 import asyncio
-import importlib
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from typing import AsyncIterator
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from loguru import logger
 
-# ---------------------------------------------------------------------------
-# Version
-# ---------------------------------------------------------------------------
-
-__version__ = "1.0.0"
-
-# ---------------------------------------------------------------------------
-# Background task registry (populated during startup)
-# ---------------------------------------------------------------------------
-
-_background_tasks: list[asyncio.Task] = []
+from clasp.api.proxy_routes import router as proxy_router
+from clasp.providers.registry import ProviderRegistry, get_registry
+from clasp.queue.manager import QueueManager, get_queue_manager
+from clasp.ratelimit.cooldown import CooldownManager, get_cooldown_manager
+from clasp.router.types import ProviderEnableConfig, SelectorConfig
 
 
-def _cancel_background_tasks() -> None:
-    for t in _background_tasks:
-        if not t.done():
-            t.cancel()
-    _background_tasks.clear()
+def build_selector_config() -> SelectorConfig:
+    """
+    Build the `SelectorConfig` the routing pipeline will use for the life of
+    this process.
 
-
-# ---------------------------------------------------------------------------
-# Startup helpers
-# ---------------------------------------------------------------------------
-
-def _init_logging(log_level: str, debug: bool) -> None:
-    from clasp.utils.logger import setup_logging  # local import — logger not yet up
-
-    setup_logging(log_level=log_level, debug=debug)
-
-
-def _load_config():
-    """Load settings and return the Settings instance."""
-    from clasp.config.settings import get_settings
-
-    settings = get_settings()
-    logger.info(
-        "Config loaded",
-        config_path=str(getattr(settings, "_config_path", "~/.clasp/config.yaml")),
+    TODO (plan.md §20 step 42): once `api/service.py` is updated to call the
+    selector, replace this with a real adapter from the pydantic `Settings`
+    object (`clasp.config.settings.get_settings()`) instead of this
+    placeholder, which only knows about the `nvidia_nim` provider so the
+    server can boot standalone today.
+    """
+    return SelectorConfig(
+        provider_chain=["nvidia_nim"],
+        providers={"nvidia_nim": ProviderEnableConfig(enabled=True)},
     )
-    return settings
 
-
-def _init_registry(settings) -> None:
-    """Initialise the provider registry (instantiate enabled providers)."""
-    try:
-        from clasp.providers.registry import init_registry
-
-        init_registry(settings)
-        enabled = [n for n, p in settings.providers.items() if p.enabled]
-        logger.info("Provider registry initialised", enabled=enabled)
-    except Exception as exc:
-        logger.warning("Provider registry init failed (non-fatal in Sprint 1)", error=str(exc))
-
-
-def _start_config_watcher(settings) -> None:
-    """Start the watchfiles config watcher as a background task."""
-    try:
-        from clasp.config.watcher import start_watcher
-
-        task = asyncio.create_task(start_watcher(), name="config_watcher")
-        _background_tasks.append(task)
-        logger.debug("Config watcher started")
-    except Exception as exc:
-        logger.warning("Config watcher not available", error=str(exc))
-
-
-def _start_sprint2_tasks() -> None:
-    """
-    Placeholder for Sprint 2+ background tasks.
-    Importing these modules will fail gracefully in Sprint 1.
-    """
-    _optional_tasks = [
-        ("clasp.ratelimit.persistence", "start_persistence_task", "ratelimit_persistence"),
-        ("clasp.queue.manager", "start_drain_task", "queue_drain"),
-    ]
-    for module_path, func_name, task_name in _optional_tasks:
-        try:
-            mod = importlib.import_module(module_path)
-            fn = getattr(mod, func_name)
-            task = asyncio.create_task(fn(), name=task_name)
-            _background_tasks.append(task)
-            logger.debug(f"Background task started: {task_name}")
-        except (ImportError, AttributeError):
-            pass  # Not yet implemented — skip silently
-
-
-# ---------------------------------------------------------------------------
-# Lifespan context manager (replaces deprecated on_event handlers)
-# ---------------------------------------------------------------------------
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-    """FastAPI lifespan — runs startup then yields, then runs shutdown."""
+    """Startup: launch the queue drain task. Shutdown: cancel it cleanly."""
+    config: SelectorConfig = build_selector_config()
+    registry: ProviderRegistry = get_registry()
+    cooldown_mgr: CooldownManager = get_cooldown_manager()
+    queue_mgr: QueueManager = get_queue_manager()
 
-    # ── STARTUP ───────────────────────────────────────────────────────────
-    settings = _load_config()
-    _init_registry(settings)
-    _start_config_watcher(settings)
-    _start_sprint2_tasks()
+    app.state.selector_config = config
+    app.state.registry = registry
+    app.state.cooldown_mgr = cooldown_mgr
+    app.state.queue_mgr = queue_mgr
 
-    # Write PID (cmd_server.py also does this, but server.py ensures it's
-    # always present even when imported directly without the CLI).
-    try:
-        from clasp.utils.pid import write_pid
-
-        write_pid()
-        logger.debug("PID file written")
-    except Exception as exc:
-        logger.warning("Could not write PID file", error=str(exc))
-
-    logger.info(
-        "CLASP proxy ready",
-        version=__version__,
-        host=settings.server.host,
-        port=settings.server.port,
+    drain_task = asyncio.create_task(
+        queue_mgr.drain_task(
+            config=config,
+            registry=registry,
+            cooldown_mgr=cooldown_mgr,
+        )
     )
+    logger.info("queue drain task started")
 
-    yield  # ←── server is running
+    # TODO: also start clasp.config.watcher's hot-reload background task
+    # here once config/watcher.py's ConfigWatcher is wired into the
+    # SelectorConfig rebuild path (today build_selector_config() is static
+    # for the lifetime of the process).
 
-    # ── SHUTDOWN ──────────────────────────────────────────────────────────
-    logger.info("CLASP shutting down…")
-    _cancel_background_tasks()
-
-    # Sprint 7+: flush rate-limit state.
     try:
-        from clasp.ratelimit.persistence import save_state  # type: ignore[import]
+        yield
+    finally:
+        drain_task.cancel()
+        try:
+            await drain_task
+        except asyncio.CancelledError:
+            pass
+        logger.info("queue drain task stopped")
 
-        await asyncio.to_thread(save_state)
-        logger.debug("Rate-limit state flushed")
-    except ImportError:
-        pass
-
-    # Clean up PID file.
-    try:
-        from clasp.utils.pid import delete_pid
-
-        delete_pid()
-        logger.debug("PID file deleted")
-    except Exception:
-        pass
-
-    # Ensure loguru's async sink is fully flushed before the process exits.
-    from loguru import logger as _log
-
-    await asyncio.to_thread(_log.complete)
-    logger.info("CLASP stopped cleanly")
+        # ── ADOPTED FROM V2: Flush async log sinks before process exit ────
+        from loguru import logger as _log
+        try:
+            await asyncio.to_thread(_log.complete)
+        except Exception:
+            pass
 
 
-# ---------------------------------------------------------------------------
-# App factory
-# ---------------------------------------------------------------------------
+def create_app(debug: bool = False) -> FastAPI:
+    """Build and return the FastAPI application."""
+    app = FastAPI(title="CLASP", lifespan=lifespan, debug=debug)
 
-def create_app(log_level: str = "INFO", debug: bool = False) -> FastAPI:
-    """
-    Create and configure the FastAPI application.
-
-    Parameters
-    ----------
-    log_level:
-        Loguru log level for the stderr sink (``INFO``, ``DEBUG``, …).
-        Overridden by ``settings.server.log_level`` after config is loaded.
-    debug:
-        When True, enables FastAPI debug mode and DEBUG logging.
-
-    Returns
-    -------
-    FastAPI
-        The fully wired application, ready for ``uvicorn``.
-    """
-    # Logging must be up before the first import that may log.
-    _init_logging(log_level=log_level, debug=debug)
-
-    # After logging is set up, pull the configured level from settings.
-    try:
-        from clasp.config.settings import get_settings
-
-        settings = get_settings()
-        effective_level = settings.server.log_level
-        if effective_level != log_level:
-            _init_logging(log_level=effective_level, debug=debug)
-    except Exception:
-        pass  # Fall back to the caller-supplied level
-
-    app = FastAPI(
-        title="CLASP — Claude API Switching Proxy",
-        version=__version__,
-        description=(
-            "Rate-limit-aware multi-provider local proxy. "
-            "Translates Claude Code's Anthropic API calls to free-tier providers."
-        ),
-        docs_url="/docs",
-        redoc_url="/redoc",
-        lifespan=lifespan,
-        debug=debug,
-    )
-
-    # ── Middleware ─────────────────────────────────────────────────────────
-    # IPGuard: must be added *before* other middleware so it runs last
-    # (FastAPI middleware stack is LIFO).
-    from clasp.utils.ip_guard import IPGuard
-
-    app.add_middleware(IPGuard)
-
-    # CORS: allow the local UI (same origin in practice, but explicit is safer).
+    # ── ADOPTED FROM V2: CORS verification for local loopback tools ───────
     app.add_middleware(
         CORSMiddleware,
         allow_origins=["http://127.0.0.1:8082", "http://localhost:8082"],
@@ -252,62 +109,13 @@ def create_app(log_level: str = "INFO", debug: bool = False) -> FastAPI:
         allow_headers=["*"],
     )
 
-    # ── Routers ────────────────────────────────────────────────────────────
-    _register_routers(app)
+    app.include_router(proxy_router)
 
-    # ── Static files (must come AFTER explicit routes) ─────────────────────
-    try:
-        from clasp.ui.routes import mount_static
-
-        mount_static(app)
-    except Exception as exc:
-        logger.warning("Could not mount static files", error=str(exc))
+    # TODO: app.add_middleware(IPGuard) once clasp/utils/ip_guard.py exists.
+    # TODO: app.include_router(internal_router) once clasp/internal/routes.py
+    #       and clasp/ui/routes.py exist.
 
     return app
 
 
-def _register_routers(app: FastAPI) -> None:
-    """Include all sub-routers into the main app."""
-
-    # ── Health (no auth) ───────────────────────────────────────────────────
-    from fastapi.responses import JSONResponse
-    from fastapi import APIRouter
-
-    health_router = APIRouter()
-
-    @health_router.get("/health", tags=["health"], include_in_schema=True)
-    async def health() -> JSONResponse:
-        """
-        Liveness probe used by ``clasp server`` to detect when the proxy is
-        ready to accept traffic.  No authentication required.
-        """
-        return JSONResponse({"status": "ok", "version": __version__})
-
-    app.include_router(health_router)
-
-    # ── Proxy routes (POST /v1/messages, GET /v1/models, …) ───────────────
-    try:
-        from clasp.api.proxy_routes import router as proxy_router
-
-        app.include_router(proxy_router)
-        logger.debug("proxy_routes registered")
-    except Exception as exc:
-        logger.warning("proxy_routes not available", error=str(exc))
-
-    # ── UI static routes (GET /, GET /ui, …) ──────────────────────────────
-    try:
-        from clasp.ui.routes import router as ui_router
-
-        app.include_router(ui_router)
-        logger.debug("ui routes registered")
-    except Exception as exc:
-        logger.warning("ui routes not available", error=str(exc))
-
-    # ── Internal management API (loopback-only) ────────────────────────────
-    try:
-        from clasp.internal.routes import router as internal_router
-
-        app.include_router(internal_router)
-        logger.debug("internal routes registered")
-    except Exception as exc:
-        logger.warning("internal routes not available", error=str(exc))
+app = create_app()
