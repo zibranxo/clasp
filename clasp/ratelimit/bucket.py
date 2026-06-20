@@ -31,9 +31,16 @@ uses it to emit a WARNING the moment a key crosses into soft-limited
 territory, which is what the manual RPM test (see CLAUDE.md) looks for in
 the logs.
 
-References: plan.md §10 "Token Bucket (`ratelimit/bucket.py`)" — the
-            `can_consume`/`consume`/`consume_actual`/`_refill` algorithm
-            below is a faithful, fully-typed implementation of that spec.
+Atomic admission
+-----------------
+``try_consume()`` performs the check and deduction in a single lock
+acquisition, eliminating the check-then-consume race that exists when
+``can_consume()`` and ``consume()`` are called as separate operations.
+``KeyPool.pick_key()`` uses this method exclusively.  ``can_consume()`` and
+``consume()`` are still provided as separate methods for callers that need
+observability-only checks (e.g. tests, health endpoints).
+
+References: plan.md §10 "Token Bucket (`ratelimit/bucket.py`)".
 """
 
 from __future__ import annotations
@@ -42,18 +49,7 @@ import asyncio
 import time
 from typing import Any
 
-try:
-    from loguru import logger
-except ModuleNotFoundError:  # pragma: no cover — shim for test environments
-    import logging as _logging
-
-    class _Shim:
-        _log = _logging.getLogger("clasp.bucket")
-
-        def debug(self, msg: str, **kw: Any) -> None:
-            self._log.debug(msg + ("  " + str(kw) if kw else ""))
-
-    logger = _Shim()  # type: ignore[assignment]
+from loguru import logger
 
 
 class TokenBucket:
@@ -102,39 +98,45 @@ class TokenBucket:
         Whether a request can be issued right now without crossing either
         the hard RPM floor (need ≥1 raw token) or the soft-threshold
         reserve, and (if tracked) without exceeding TPM capacity.
+
+        Note: this is an observability/check-only call.  For atomic
+        admission (check + deduct in one lock), use ``try_consume()``.
         """
         async with self._lock:
             self._refill()
-            rpm_ok = self.rpm_tokens >= 1.0
-            # Crossed into the soft-limited zone: fewer tokens remain than
-            # the configured reserve (capacity * (1 - soft_threshold)).
-            below_reserve = self.rpm_tokens < (self.rpm_capacity * (1.0 - self.soft_threshold))
-            tpm_ok = self.tpm_capacity is None or self.tpm_tokens >= estimated_tokens
-            result = rpm_ok and not below_reserve and tpm_ok
-            if not result:
-                logger.debug(
-                    "bucket: can_consume=False",
-                    rpm_tokens=round(self.rpm_tokens, 3),
-                    rpm_capacity=self.rpm_capacity,
-                    below_reserve=below_reserve,
-                    rpm_ok=rpm_ok,
-                    tpm_ok=tpm_ok,
-                )
-            return result
+            return self._check_locked(estimated_tokens)
 
     async def consume(self, estimated_tokens: int = 0) -> None:
         """Deduct one RPM token and *estimated_tokens* TPM tokens (pre-flight estimate)."""
         async with self._lock:
             self._refill()
-            self.rpm_tokens = max(0.0, self.rpm_tokens - 1.0)
-            if self.tpm_capacity is not None:
-                self.tpm_tokens = max(0.0, self.tpm_tokens - estimated_tokens)
+            self._deduct_locked(estimated_tokens)
+
+    async def try_consume(self, estimated_tokens: int = 0) -> bool:
+        """
+        Atomically check capacity and, if sufficient, deduct tokens.
+
+        Returns ``True`` and deducts tokens if the request can proceed;
+        returns ``False`` and leaves the bucket unchanged if not.
+
+        This is the correct API for ``KeyPool.pick_key()`` to use — it
+        eliminates the check-then-consume race that exists when
+        ``can_consume()`` and ``consume()`` are called as two separate
+        lock acquisitions by concurrent tasks.
+        """
+        async with self._lock:
+            self._refill()
+            if not self._check_locked(estimated_tokens):
+                return False
+            self._deduct_locked(estimated_tokens)
+            return True
 
     async def consume_actual(self, actual: int, estimated: int) -> None:
         """
         Reconcile the TPM bucket once the provider's real `usage.output_tokens`
         (or full actual count) is known. Only the *delta* vs. the pre-flight
-        estimate is applied — the estimate was already deducted by `consume()`.
+        estimate is applied — the estimate was already deducted by `consume()`
+        or `try_consume()`.
         """
         delta = actual - estimated
         if self.tpm_capacity is not None and delta != 0:
@@ -142,7 +144,12 @@ class TokenBucket:
                 self.tpm_tokens = max(0.0, self.tpm_tokens - delta)
 
     def seconds_until_available(self) -> float:
-        """Estimated wall-clock seconds until at least 1 RPM token is available."""
+        """
+        Estimated wall-clock seconds until at least 1 RPM token is available.
+
+        Best-effort, observability-only — reads rpm_tokens without acquiring
+        the lock, so concurrent mutations may make the result stale.
+        """
         deficit = max(0.0, 1.0 - self.rpm_tokens)
         return deficit / self.rpm_refill_rate if self.rpm_refill_rate > 0 else 60.0
 
@@ -174,7 +181,31 @@ class TokenBucket:
     # Internal
     # ------------------------------------------------------------------
 
+    def _check_locked(self, estimated_tokens: int) -> bool:
+        """Capacity check — must be called with ``_lock`` held."""
+        rpm_ok = self.rpm_tokens >= 1.0
+        below_reserve = self.rpm_tokens < (self.rpm_capacity * (1.0 - self.soft_threshold))
+        tpm_ok = self.tpm_capacity is None or self.tpm_tokens >= estimated_tokens
+        result = rpm_ok and not below_reserve and tpm_ok
+        if not result:
+            logger.debug(
+                "bucket: admission denied",
+                rpm_tokens=round(self.rpm_tokens, 3),
+                rpm_capacity=self.rpm_capacity,
+                below_reserve=below_reserve,
+                rpm_ok=rpm_ok,
+                tpm_ok=tpm_ok,
+            )
+        return result
+
+    def _deduct_locked(self, estimated_tokens: int) -> None:
+        """Token deduction — must be called with ``_lock`` held."""
+        self.rpm_tokens = max(0.0, self.rpm_tokens - 1.0)
+        if self.tpm_capacity is not None:
+            self.tpm_tokens = max(0.0, self.tpm_tokens - estimated_tokens)
+
     def _refill(self) -> None:
+        """Apply lazy refill — must be called with ``_lock`` held."""
         now = time.monotonic()
         elapsed = now - self._last_refill
         self.rpm_tokens = min(

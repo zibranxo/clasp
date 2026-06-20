@@ -6,13 +6,12 @@ Unit tests for clasp.api.proxy_routes.
 
 from __future__ import annotations
 
+import os
 import sys
 import uuid
 from unittest.mock import AsyncMock, MagicMock
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
-
-import os
 
 from clasp.api.proxy_routes import (
     router,

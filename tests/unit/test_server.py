@@ -6,13 +6,12 @@ Unit tests for clasp.server.
 
 from __future__ import annotations
 
-import sys
 import asyncio
+import os
+import sys
 from unittest.mock import AsyncMock, MagicMock
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
-
-import os
 
 from clasp.server import (
     create_app,

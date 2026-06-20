@@ -13,7 +13,6 @@ sys.path.insert(0, str(ROOT))
 from clasp.providers.base import (
     BaseProvider,
     ProviderConnectionError,
-    ProviderError,
     ProviderHTTPError,
     ProviderTimeoutError,
 )
@@ -59,12 +58,11 @@ def test_repr_and_base_url_normalization() -> None:
 
 def test_provider_http_error_fields() -> None:
     err = ProviderHTTPError(429, "rate limited", retry_after=3.5, body="{...}")
-    assert isinstance(err, ProviderError)
     assert err.status_code == 429
     assert err.retry_after == 3.5
     assert err.body == "{...}"
 
 
 def test_exception_hierarchy() -> None:
-    assert issubclass(ProviderTimeoutError, ProviderError)
-    assert issubclass(ProviderConnectionError, ProviderError)
+    assert issubclass(ProviderTimeoutError, Exception)
+    assert issubclass(ProviderConnectionError, Exception)

@@ -6,14 +6,13 @@ Unit tests for clasp.internal.routes.
 
 from __future__ import annotations
 
-import sys
 import json
+import os
+import sys
 import time
 from unittest.mock import AsyncMock, MagicMock
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
-
-import os
 
 from clasp.internal.routes import (
     router,

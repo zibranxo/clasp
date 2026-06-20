@@ -131,7 +131,7 @@ def resolve_model(
             return slug
 
     # 2. tier keyword in requested model name
-    requested_model = (request.model or "").lower()
+    requested_model = (request.body.get("model", "") or "").lower()
     if requested_model:
         for tier in _tier_keys_in_order(routing_models):
             if tier in requested_model:
@@ -156,7 +156,7 @@ def resolve_model(
             return slug
 
     logger.debug("model_map: no mapping for provider", provider=provider_name,
-                requested_model=request.model)
+                requested_model=request.body.get("model"))
     return None
 
 

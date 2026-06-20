@@ -9,7 +9,7 @@ Coverage map (as requested):
   3. all keys exhausted -> returns None
   4. key in cooldown is skipped even if its bucket has capacity
 
-Each test builds its own isolated CooldownTracker (rather than relying on
+Each test builds its own isolated CooldownManager (rather than relying on
 the module-level default singleton) and injects it via
 KeyPool(..., cooldown_tracker=...), so cooldown state never leaks
 between tests.
@@ -26,20 +26,15 @@ Additional cases:
     cooldown are two independent reasons a key can be unusable).
 """
 
-import asyncio
-import sys
-import os
+from __future__ import annotations
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "_stubs"))
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
+import pytest
 
 from clasp.config.provider_catalog import ProviderProfile
-from clasp.ratelimit.cooldown import CooldownTracker
+from clasp.ratelimit.cooldown import CooldownManager
 from clasp.ratelimit.key_pool import KeyPool
 
-
-def _run(coro):
-    return asyncio.run(coro)
+pytestmark = pytest.mark.asyncio
 
 
 def _make_profile(
@@ -72,7 +67,7 @@ def _make_pool(num_keys: int = 3, **profile_kwargs) -> KeyPool:
     keys = [f"key-{i}" for i in range(num_keys)]
     profile = _make_profile(**profile_kwargs)
     # Fresh, isolated tracker per pool — never the shared default singleton.
-    tracker = CooldownTracker()
+    tracker = CooldownManager()
     return KeyPool("test_provider", keys, profile, cooldown_tracker=tracker)
 
 
@@ -90,29 +85,29 @@ async def _pick_many(pool: KeyPool, n: int) -> list[int | None]:
 
 
 class TestRoundRobin:
-    def test_three_healthy_keys_round_robin(self):
+    async def test_three_healthy_keys_round_robin(self):
         pool = _make_pool(3)
-        indices = _run(_pick_many(pool, 6))
+        indices = await _pick_many(pool, 6)
         assert indices == [0, 1, 2, 0, 1, 2]
 
-    def test_returns_correct_api_key_string(self):
+    async def test_returns_correct_api_key_string(self):
         pool = _make_pool(3)
-        result = _run(pool.pick_key())
+        result = await pool.pick_key()
         assert result == ("key-0", 0)
 
-    def test_single_key_always_returns_index_zero(self):
+    async def test_single_key_always_returns_index_zero(self):
         pool = _make_pool(1)
-        indices = _run(_pick_many(pool, 4))
+        indices = await _pick_many(pool, 4)
         assert indices == [0, 0, 0, 0]
 
-    def test_round_robin_counter_persists_across_calls(self):
+    async def test_round_robin_counter_persists_across_calls(self):
         """The internal _rr counter keeps advancing across separate
         pick_key() calls, not just within a single batch."""
         pool = _make_pool(3)
-        first = _run(pool.pick_key())
-        second = _run(pool.pick_key())
-        third = _run(pool.pick_key())
-        fourth = _run(pool.pick_key())
+        first = await pool.pick_key()
+        second = await pool.pick_key()
+        third = await pool.pick_key()
+        fourth = await pool.pick_key()
         assert [r[1] for r in (first, second, third, fourth)] == [0, 1, 2, 0]
 
 
@@ -122,33 +117,33 @@ class TestRoundRobin:
 
 
 class TestExhaustedKeySkipped:
-    def test_key_zero_exhausted_picks_one_then_two(self):
+    async def test_key_zero_exhausted_picks_one_then_two(self):
         pool = _make_pool(3)
         pool.buckets[0].rpm_tokens = 0.0  # simulate key 0 fully exhausted
 
-        first = _run(pool.pick_key())
-        second = _run(pool.pick_key())
+        first = await pool.pick_key()
+        second = await pool.pick_key()
 
         assert first == ("key-1", 1)
         assert second == ("key-2", 2)
 
-    def test_exhausted_key_recovers_once_capacity_returns(self):
+    async def test_exhausted_key_recovers_once_capacity_returns(self):
         pool = _make_pool(3)
         pool.buckets[0].rpm_tokens = 0.0
-        _run(pool.pick_key())  # consumes key 1 (key 0 skipped)
-        _run(pool.pick_key())  # consumes key 2
+        await pool.pick_key()  # consumes key 1 (key 0 skipped)
+        await pool.pick_key()  # consumes key 2
 
         # Restore key 0's capacity — next round-robin pass should pick it up again.
         pool.buckets[0].rpm_tokens = float(pool.buckets[0].rpm_capacity)
-        third = _run(pool.pick_key())
+        third = await pool.pick_key()
         assert third == ("key-0", 0)
 
-    def test_middle_key_exhausted_skips_only_that_one(self):
+    async def test_middle_key_exhausted_skips_only_that_one(self):
         pool = _make_pool(3)
         pool.buckets[1].rpm_tokens = 0.0
 
-        first = _run(pool.pick_key())
-        second = _run(pool.pick_key())
+        first = await pool.pick_key()
+        second = await pool.pick_key()
 
         assert first == ("key-0", 0)
         assert second == ("key-2", 2)
@@ -160,38 +155,38 @@ class TestExhaustedKeySkipped:
 
 
 class TestAllExhausted:
-    def test_all_keys_exhausted_returns_none(self):
+    async def test_all_keys_exhausted_returns_none(self):
         pool = _make_pool(3)
         for bucket in pool.buckets:
             bucket.rpm_tokens = 0.0
-        result = _run(pool.pick_key())
+        result = await pool.pick_key()
         assert result is None
 
-    def test_empty_key_list_returns_none(self):
+    async def test_empty_key_list_returns_none(self):
         profile = _make_profile()
-        tracker = CooldownTracker()
+        tracker = CooldownManager()
         pool = KeyPool("test_provider", [], profile, cooldown_tracker=tracker)
-        result = _run(pool.pick_key())
+        result = await pool.pick_key()
         assert result is None
 
-    def test_pick_key_tries_each_key_at_most_once(self):
+    async def test_pick_key_tries_each_key_at_most_once(self):
         """Bounded loop: with all keys unhealthy, pick_key() returns
         rather than spinning — and the round-robin counter only advances
         by exactly len(keys), not unboundedly."""
         pool = _make_pool(3)
         for bucket in pool.buckets:
             bucket.rpm_tokens = 0.0
-        _run(pool.pick_key())
+        await pool.pick_key()
         assert pool._rr == 3
 
-    def test_recovers_after_being_fully_exhausted(self):
+    async def test_recovers_after_being_fully_exhausted(self):
         pool = _make_pool(3)
         for bucket in pool.buckets:
             bucket.rpm_tokens = 0.0
-        assert _run(pool.pick_key()) is None
+        assert await pool.pick_key() is None
 
         pool.buckets[1].rpm_tokens = float(pool.buckets[1].rpm_capacity)
-        result = _run(pool.pick_key())
+        result = await pool.pick_key()
         assert result == ("key-1", 1)
 
 
@@ -201,42 +196,43 @@ class TestAllExhausted:
 
 
 class TestCooldownSkipped:
-    def test_cooling_key_skipped_despite_full_bucket(self):
+    async def test_cooling_key_skipped_despite_full_bucket(self):
         pool = _make_pool(3)
         # key 1 has full capacity but is in cooldown.
         pool._cooldown.on_429("test_provider", 1, retry_after_header="120")
 
-        first = _run(pool.pick_key())
-        second = _run(pool.pick_key())
+        first = await pool.pick_key()
+        second = await pool.pick_key()
 
         assert first == ("key-0", 0)
         assert second == ("key-2", 2)  # key 1 skipped despite healthy bucket
 
-    def test_all_other_keys_cooling_leaves_only_one_available(self):
+    async def test_all_other_keys_cooling_leaves_only_one_available(self):
         pool = _make_pool(3)
         pool._cooldown.on_429("test_provider", 0, retry_after_header="60")
         pool._cooldown.on_429("test_provider", 2, retry_after_header="60")
 
-        indices = _run(_pick_many(pool, 3))
+        indices = await _pick_many(pool, 3)
         assert indices == [1, 1, 1]
 
-    def test_cooling_on_one_provider_does_not_affect_another(self):
+    async def test_cooling_on_one_provider_does_not_affect_another(self):
         """Cooldown keys are (provider, key_index) — a key index cooling
         for a DIFFERENT provider name must not affect this pool."""
         pool = _make_pool(3)
         pool._cooldown.on_429("some_other_provider", 0, retry_after_header="120")
 
-        result = _run(pool.pick_key())
+        result = await pool.pick_key()
         assert result == ("key-0", 0)  # unaffected — different provider name
 
-    def test_expired_cooldown_key_becomes_available_again(self):
+    async def test_expired_cooldown_key_becomes_available_again(self):
         pool = _make_pool(3)
         # Put key 0 in cooldown, then manually expire it by rewinding the
-        # recovery timestamp into the past.
+        # recovery timestamp into the past so is_cooling() returns False.
         pool._cooldown.on_429("test_provider", 0, retry_after_header="120")
-        pool._cooldown._cooling_until[("test_provider", 0)] = 0.0  # already in the past
+        # _cooling maps (provider, idx) -> monotonic recovery timestamp.
+        pool._cooldown._cooling[("test_provider", 0)] = 0.0  # already in the past
 
-        result = _run(pool.pick_key())
+        result = await pool.pick_key()
         assert result == ("key-0", 0)
 
 
@@ -246,14 +242,14 @@ class TestCooldownSkipped:
 
 
 class TestHealthSummary:
-    def test_all_healthy_summary(self):
+    async def test_all_healthy_summary(self):
         pool = _make_pool(3)
         summary = pool.health_summary()
         assert summary["total"] == 3
         assert summary["healthy"] == 3
         assert all(k["status"] == "healthy" for k in summary["keys"])
 
-    def test_cooling_key_shows_cooling_status(self):
+    async def test_cooling_key_shows_cooling_status(self):
         pool = _make_pool(3)
         pool._cooldown.on_429("test_provider", 1, retry_after_header="90")
         summary = pool.health_summary()
@@ -261,16 +257,16 @@ class TestHealthSummary:
         assert summary["keys"][1]["status"] == "cooling"
         assert summary["keys"][1]["recovery_in"] > 0
 
-    def test_redacted_key_format(self):
+    async def test_redacted_key_format(self):
         profile = _make_profile()
-        tracker = CooldownTracker()
+        tracker = CooldownManager()
         pool = KeyPool("p", ["sk-abcdefghijklmnop"], profile, cooldown_tracker=tracker)
         summary = pool.health_summary()
         assert summary["keys"][0]["redacted"] == "sk-abc***mnop"
 
-    def test_short_key_fully_redacted(self):
+    async def test_short_key_fully_redacted(self):
         profile = _make_profile()
-        tracker = CooldownTracker()
+        tracker = CooldownManager()
         pool = KeyPool("p", ["short"], profile, cooldown_tracker=tracker)
         summary = pool.health_summary()
         assert summary["keys"][0]["redacted"] == "***"
@@ -283,7 +279,7 @@ class TestHealthSummary:
 
 
 class TestCircuitBreakerIntegration:
-    def test_three_consecutive_429s_trips_breaker_and_blocks_key(self):
+    async def test_three_consecutive_429s_trips_breaker_and_blocks_key(self):
         pool = _make_pool(3)
         # Three 429s on key 0, but WITHOUT going through cooldown.on_429
         # (e.g. imagine the breaker's own independent trip — here we
@@ -294,16 +290,16 @@ class TestCircuitBreakerIntegration:
             pool._cooldown.reset("test_provider", 0)
 
         assert pool.circuit_breakers[0].state == "open"
-        result = _run(pool.pick_key())
+        result = await pool.pick_key()
         # key 0's cooldown was reset, but its breaker is open -> skipped.
         assert result == ("key-1", 1)
 
-    def test_record_success_resets_breaker_counters(self):
+    async def test_record_success_resets_breaker_counters(self):
         pool = _make_pool(3)
         pool.record_429(0, retry_after_header=None)
         pool.record_429(0, retry_after_header=None)
         pool.record_success(0)
         assert pool.circuit_breakers[0].state == "closed"
         pool._cooldown.reset("test_provider", 0)
-        result = _run(pool.pick_key())
+        result = await pool.pick_key()
         assert result == ("key-0", 0)

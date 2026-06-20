@@ -70,10 +70,11 @@ async def on_upstream_429(
         queue_mgr = get_queue_manager()
 
     # ── 1. Update state ─────────────────────────────────────────────────
-    wait_s = cooldown_mgr.on_429(failed_provider, failed_key_index, retry_after_header)
-    cb = registry.get_circuit_breaker(failed_provider)
-    if cb is not None:
-        cb.record_429()
+    pool = registry.get_key_pool(failed_provider)
+    if pool is not None:
+        wait_s = pool.record_429(failed_key_index, retry_after_header)
+    else:
+        wait_s = cooldown_mgr.on_429(failed_provider, failed_key_index, retry_after_header)
 
     logger.warning(
         "absorbing upstream 429",

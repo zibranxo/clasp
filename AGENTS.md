@@ -1,7 +1,7 @@
 # CLASP — Code Quality Review & Test Evaluation Session
 
-> Use this CLAUDE.md only for checkpoint review sessions, run after finishing a sprint and
-> before starting the next one. Swap your normal implementation CLAUDE.md back in afterward.
+> Use this AGENTS.md only for checkpoint review sessions, run after finishing a sprint and
+> before starting the next one. Swap your normal implementation AGENTS.md back in afterward.
 > Replace every `Sprint X` below with the actual sprint number you just finished
 > (e.g. "Sprint 3 complete") before starting the session.
 
@@ -15,17 +15,17 @@ resumes in a separate session after the user reviews your reports.
 
 ## Project context
 
-CLASP — a rate-limit-aware multi-provider proxy that lets Claude Code use free-tier
+CLASP — a rate-limit-aware multi-provider proxy that lets Codex use free-tier
 OpenAI-compatible APIs without hitting 429 errors. Full spec is in plan.md. The file-by-file
 implementation order and sprint boundaries are in plan.md Section 20.
 
 ## Current checkpoint
 
-**Nothing is complete this is first iteration you are supposed to do sprint 1.**
+**Sprint X complete.**
 
-Files in scope for this review: everything implemented through Sprint 1 per plan.md
+Files in scope for this review: everything implemented through Sprint X per plan.md
 Section 20. Confirm the exact file list by checking the "files completed so far" list in
-the project's regular CLAUDE.md, or by running `git log --oneline` / `git diff --stat
+the project's regular AGENTS.md, or by running `git log --oneline` / `git diff --stat
 <last-checkpoint-tag>..HEAD` if commits are tagged per sprint. If scope is unclear, list
 every `.py` file under `clasp/` and `tests/` that exists on disk and treat all of it as
 in scope — do not guess which files to skip.
@@ -67,7 +67,7 @@ Write findings to `report.md` at the repo root, **overwriting any previous versi
 this exact structure:
 
 ```markdown
-# Code Quality Report — Sprint 1Checkpoint
+# Code Quality Report — Sprint X Checkpoint
 Date: [today's date]
 Files reviewed: [count]
 
@@ -119,7 +119,7 @@ Write findings to `evaluation.md` at the repo root, **overwriting any previous v
 using this exact structure:
 
 ```markdown
-# Test Evaluation — Sprint 1Checkpoint
+# Test Evaluation — Sprint X Checkpoint
 Date: [today's date]
 
 ## Summary

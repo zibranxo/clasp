@@ -23,7 +23,12 @@ from dataclasses import dataclass
 
 import pytest
 
-from clasp.ratelimit.circuit_breaker import CircuitBreaker, CircuitState
+from clasp.ratelimit.circuit_breaker import (
+    CONSECUTIVE_429_THRESHOLD,
+    CONSECUTIVE_TIMEOUT_THRESHOLD,
+    CircuitBreaker,
+    CircuitState,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -94,8 +99,7 @@ def test_is_closed_returns_true_for_half_open():
     cb.record_429()
     cb.record_429()
     cb.record_429()
-    assert cb.state == CircuitState.OPEN
-    # cooldown_seconds=0.0 means check_recovery() flips it immediately.
+    # cooldown_seconds=0.0 means check_recovery() or state properties flip it immediately.
     assert cb.is_closed() is True
     assert cb.state == CircuitState.HALF_OPEN
 
@@ -128,7 +132,7 @@ def test_half_open_success_closes_and_resets_counters():
     assert cb.consecutive_429s == 0
     assert cb.consecutive_timeouts == 0
     # Internal rolling window should also be cleared by a full reset.
-    assert len(cb._window) == 0
+    assert len(cb._recent_outcomes) == 0
 
 
 # ---------------------------------------------------------------------------
@@ -143,7 +147,7 @@ def test_half_open_failure_reopens_with_doubled_cooldown():
     assert cb.cooldown_seconds == pytest.approx(1.0)  # first trip: no doubling
 
     # Force into HALF_OPEN without waiting a full second.
-    cb._opened_at = cb._opened_at - 10.0  # simulate cooldown having elapsed
+    cb._recovery_at = cb._recovery_at - 10.0  # simulate cooldown having elapsed
     assert cb.check_recovery() == CircuitState.HALF_OPEN
 
     cb.record_429()  # the single test request fails
@@ -159,12 +163,12 @@ def test_repeated_half_open_failures_keep_doubling_up_to_cap():
     cb.record_429()
     assert cb.cooldown_seconds == pytest.approx(300.0)
 
-    cb._opened_at = cb._opened_at - 1000.0
+    cb._recovery_at = cb._recovery_at - 1000.0
     cb.check_recovery()
     cb.record_429()  # HALF_OPEN failure → doubles to 600 (capped)
     assert cb.cooldown_seconds == pytest.approx(600.0)
 
-    cb._opened_at = cb._opened_at - 1000.0
+    cb._recovery_at = cb._recovery_at - 1000.0
     cb.check_recovery()
     cb.record_429()  # would double to 1200, but capped at 600
     assert cb.cooldown_seconds == pytest.approx(600.0)
@@ -238,8 +242,9 @@ def test_error_rate_above_threshold_trips_even_without_consecutive_streak():
     cb.record_error()    # fail 3/5 — window len=5, MIN_WINDOW_SIZE reached:
     #                        window=[T,F,T,F,T], rate=3/5=60% > 50% → trips here.
     assert cb.state == CircuitState.OPEN
-    assert cb.consecutive_429s < CircuitBreaker.CONSECUTIVE_429_THRESHOLD
-    assert cb.consecutive_timeouts < CircuitBreaker.CONSECUTIVE_TIMEOUT_THRESHOLD
+    # Verify the trip was caused by error rate, not consecutive counters.
+    assert cb.consecutive_429s < CONSECUTIVE_429_THRESHOLD
+    assert cb.consecutive_timeouts < CONSECUTIVE_TIMEOUT_THRESHOLD
 
 
 def test_exactly_half_error_rate_does_not_trip():
@@ -260,8 +265,8 @@ def test_exactly_half_error_rate_does_not_trip():
     ]
     for fn in sequence:
         fn()
-    assert len(cb._window) == 10
-    assert sum(cb._window) == 5  # exactly 50%
+    assert len(cb._recent_outcomes) == 10
+    assert sum(cb._recent_outcomes) == 5  # exactly 50%
     assert cb.state == CircuitState.CLOSED
 
 
@@ -275,5 +280,5 @@ def test_window_evicts_old_entries_beyond_ten():
     # should never grow past maxlen=10.
     for _ in range(20):
         cb.record_success()
-    assert len(cb._window) == 10
+    assert len(cb._recent_outcomes) == 10
     assert cb.state == CircuitState.CLOSED

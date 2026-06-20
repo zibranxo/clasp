@@ -7,13 +7,20 @@ counters survive a `clasp server` restart (design principle P7).
 Recovery timestamps are stored as absolute Unix time (not
 time.monotonic(), which resets to an arbitrary epoch every process
 start) — the monotonic<->wall-clock conversion itself lives in
-CooldownTracker.export_cooldowns()/import_cooldowns(), since that's
-where the underlying _cooling_until dict actually lives; this module
+CooldownManager.export_cooldowns()/import_cooldowns(), since that's
+where the underlying _cooling dict actually lives; this module
 just orchestrates when to call those and where the bytes go on disk.
 
 On load, if the stored date doesn't match today, daily counters reset
 to {} (cooldowns/failure counts are NOT date-gated — a key cooling down
 at 11:59pm should still be cooling at 12:01am).
+
+Async I/O
+---------
+``periodic_save_task()`` offloads the synchronous file write to a thread
+executor so it does not block the event loop during the periodic save.
+The synchronous ``save_state()`` is kept sync for use from shutdown
+handlers and tests.
 """
 
 from __future__ import annotations
@@ -26,7 +33,7 @@ from typing import Callable
 
 from loguru import logger
 
-from clasp.ratelimit.cooldown import CooldownTracker
+from clasp.ratelimit.cooldown import CooldownManager
 
 DEFAULT_STATE_PATH = Path.home() / ".clasp" / "ratelimit.json"
 DEFAULT_SAVE_INTERVAL_SECONDS = 30.0
@@ -41,7 +48,7 @@ def _today_str() -> str:
 # --------------------------------------------------------------------------- #
 
 
-def build_snapshot(tracker: CooldownTracker, daily_counters: dict | None = None) -> dict:
+def build_snapshot(tracker: CooldownManager, daily_counters: dict | None = None) -> dict:
     return {
         "date": _today_str(),
         "cooldowns": tracker.export_cooldowns(),
@@ -51,7 +58,7 @@ def build_snapshot(tracker: CooldownTracker, daily_counters: dict | None = None)
 
 
 def save_state(
-    tracker: CooldownTracker,
+    tracker: CooldownManager,
     *,
     daily_counters: dict | None = None,
     path: Path | None = None,
@@ -79,7 +86,7 @@ def save_state(
 # --------------------------------------------------------------------------- #
 
 
-def load_state(tracker: CooldownTracker, *, path: Path | None = None) -> dict:
+def load_state(tracker: CooldownManager, *, path: Path | None = None) -> dict:
     """
     Load persisted state into `tracker` in place (cooldowns + failure
     counts). Returns the daily counters dict to seed elsewhere — reset to
@@ -103,11 +110,21 @@ def load_state(tracker: CooldownTracker, *, path: Path | None = None) -> dict:
         logger.warning(f"ratelimit persistence: {path} is not a JSON object, starting fresh")
         return {}
 
-    tracker.import_cooldowns(raw.get("cooldowns") or {})
-    tracker.import_failure_counts(raw.get("failure_counts") or {})
+    # Guard against structurally invalid but syntactically valid JSON.
+    cooldowns = raw.get("cooldowns")
+    if not isinstance(cooldowns, dict):
+        cooldowns = {}
+    failure_counts = raw.get("failure_counts")
+    if not isinstance(failure_counts, dict):
+        failure_counts = {}
+
+    tracker.import_cooldowns(cooldowns)
+    tracker.import_failure_counts(failure_counts)
 
     stored_date = raw.get("date")
-    daily_counters = raw.get("daily_counters") or {}
+    daily_counters = raw.get("daily_counters")
+    if not isinstance(daily_counters, dict):
+        daily_counters = {}
     today = _today_str()
     if stored_date != today:
         logger.info(
@@ -124,7 +141,7 @@ def load_state(tracker: CooldownTracker, *, path: Path | None = None) -> dict:
 
 
 async def periodic_save_task(
-    tracker: CooldownTracker,
+    tracker: CooldownManager,
     *,
     daily_counters_provider: Callable[[], dict] | None = None,
     interval_seconds: float = DEFAULT_SAVE_INTERVAL_SECONDS,
@@ -144,13 +161,23 @@ async def periodic_save_task(
     `daily_counters_provider`, if given, is called fresh on every save
     (and on the final shutdown save) so this module never has to know
     how/where daily usage counts are actually tracked.
+
+    File I/O is offloaded to a thread executor so it does not block the
+    event loop during the periodic save interval.
     """
+    loop = asyncio.get_event_loop()
+
+    async def _async_save() -> None:
+        counters = daily_counters_provider() if daily_counters_provider else None
+        await loop.run_in_executor(
+            None, lambda: save_state(tracker, daily_counters=counters, path=path)
+        )
+
     try:
         while True:
             await asyncio.sleep(interval_seconds)
-            counters = daily_counters_provider() if daily_counters_provider else None
-            save_state(tracker, daily_counters=counters, path=path)
+            await _async_save()
     except asyncio.CancelledError:
-        counters = daily_counters_provider() if daily_counters_provider else None
-        save_state(tracker, daily_counters=counters, path=path)
+        # Final save on clean shutdown — still async to be consistent.
+        await _async_save()
         raise

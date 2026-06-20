@@ -166,7 +166,18 @@ def get(
     supports_thinking = profile.supports_thinking
     max_context_tokens = profile.max_context_tokens
 
-    # Layer 2: user config override (provider-wide)
+    # Layer 2 (applied first): model-slug quirk override.
+    # These are built-in adjustments for models whose real capabilities differ
+    # from the provider-level catalog default (e.g. kimi-k2-thinking on NIM).
+    overrides = _model_overrides_for(model_slug)
+    supports_tools = overrides.get("supports_tools", supports_tools)
+    supports_vision = overrides.get("supports_vision", supports_vision)
+    supports_thinking = overrides.get("supports_thinking", supports_thinking)
+    max_context_tokens = overrides.get("max_context_tokens", max_context_tokens)
+
+    # Layer 3 (applied last, wins): user config override (provider-wide).
+    # An explicit user correction always takes precedence over any built-in
+    # quirk table entry — the user knows their deployment better than we do.
     if settings is None:
         from clasp.config.settings import get_settings
         settings = get_settings()
@@ -181,13 +192,6 @@ def get(
             supports_thinking = cfg.supports_thinking
         if cfg.max_context_tokens is not None:
             max_context_tokens = cfg.max_context_tokens
-
-    # Layer 3: model-slug quirk override
-    overrides = _model_overrides_for(model_slug)
-    supports_tools = overrides.get("supports_tools", supports_tools)
-    supports_vision = overrides.get("supports_vision", supports_vision)
-    supports_thinking = overrides.get("supports_thinking", supports_thinking)
-    max_context_tokens = overrides.get("max_context_tokens", max_context_tokens)
 
     result = Capability(
         supports_tools=supports_tools,

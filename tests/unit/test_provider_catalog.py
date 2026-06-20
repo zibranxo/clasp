@@ -6,11 +6,10 @@ Unit tests for clasp.config.provider_catalog.
 
 from __future__ import annotations
 
+import os
 import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
-
-import os
 
 from clasp.config.provider_catalog import ProviderProfile, PROVIDER_CATALOG, get_profile
 

@@ -7,12 +7,11 @@ Unit tests for clasp.config.watcher.
 from __future__ import annotations
 
 import asyncio
+import os
 import sys
 from unittest.mock import AsyncMock, MagicMock, patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
-
-import os
 
 from clasp.config.watcher import ConfigWatcher, get_watcher
 from clasp.config.settings import Settings

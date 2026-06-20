@@ -76,6 +76,9 @@ class _FakeProfile:
     display_name: str
     backoff_base_seconds: int = 100
     cooldown_seconds: int = 100
+    rpm_limit: int = 1000
+    tpm_limit: int | None = None
+    rpm_soft_threshold: float = 1.0
 
 
 FAKE_CATALOG: dict[str, _FakeProfile] = {
@@ -162,19 +165,19 @@ def _make_request() -> AnthropicRequest:
 
 def _make_registry(
     providers: dict[str, tuple[BaseProvider, list[str]]],
+    cooldown_mgr: CooldownManager,
 ) -> ProviderRegistry:
+    from clasp.ratelimit.key_pool import KeyPool
     registry = ProviderRegistry()
     for name, (provider, keys) in providers.items():
         profile = FAKE_CATALOG[name]
-        bucket = TokenBucket(rpm_limit=1000, tpm_limit=None, soft_threshold=1.0)
-        cb = CircuitBreaker(profile)
-        registry.register(
-            name,
-            provider=provider,
-            bucket=bucket,
-            circuit_breaker=cb,
-            keys=keys,
-        )
+        pool = KeyPool(name, keys, profile, cooldown_tracker=cooldown_mgr)
+        # Override bucket to match the test's original TokenBucket configuration
+        for key_idx in range(len(keys)):
+            pool.buckets[key_idx].rpm_limit = 1000
+            pool.buckets[key_idx].tpm_limit = None
+            pool.buckets[key_idx].soft_threshold = 1.0
+        registry._register(name, provider, pool)
     return registry
 
 
@@ -223,11 +226,11 @@ async def test_immediate_failover_on_429():
     provider_a = RateLimitedProvider("provider_a")
     provider_b = HealthyProvider("provider_b", provider_b_chunks)
 
+    cooldown_mgr = CooldownManager(catalog=FAKE_CATALOG)
     registry = _make_registry({
         "provider_a": (provider_a, ["key_a_0"]),
         "provider_b": (provider_b, ["key_b_0"]),
-    })
-    cooldown_mgr = CooldownManager(catalog=FAKE_CATALOG)
+    }, cooldown_mgr)
     queue_mgr = QueueManager(max_wait_seconds=30.0)
     config = _make_config(["provider_a", "provider_b"])
     request = _make_request()
@@ -296,18 +299,19 @@ async def test_queue_and_hold_when_all_cooling():
     # provider_a failed with a 429 before this call; provider_b is cooling too.
     provider_a = RateLimitedProvider("provider_a")
 
+    cooldown_mgr = CooldownManager(catalog=FAKE_CATALOG)
     registry = _make_registry({
         "provider_a": (provider_a, ["key_a_0"]),
         "provider_b": (provider_b, ["key_b_0"]),
-    })
-    cooldown_mgr = CooldownManager(catalog=FAKE_CATALOG)
+    }, cooldown_mgr)
     queue_mgr = QueueManager(max_wait_seconds=30.0)
     config = _make_config(["provider_a", "provider_b"], max_wait=30.0)
     request = _make_request()
 
     # Pre-mark provider_b as cooling (its own upstream 429 happened earlier).
     # Use a 200 s duration so it stays cooling for the duration of the test.
-    cooldown_mgr._set_cooling("provider_b", 0, time.monotonic() + 200.0)
+    with cooldown_mgr._lock:
+        cooldown_mgr._cooling[("provider_b", 0)] = time.monotonic() + 200.0
     # provider_a will be marked cooling by on_upstream_429() → cooldown_mgr.on_429().
 
     # Start the drain task.
@@ -322,7 +326,8 @@ async def test_queue_and_hold_when_all_cooling():
     # Concurrent task: re-enable provider_b after 2 s.
     async def _re_enable_b() -> None:
         await asyncio.sleep(2.0)
-        cooldown_mgr._re_enable("provider_b", 0)
+        with cooldown_mgr._lock:
+            cooldown_mgr._cooling.pop(("provider_b", 0), None)
 
     re_enable_task = asyncio.create_task(_re_enable_b())
 
@@ -389,18 +394,19 @@ async def test_queue_timeout():
     provider_a = RateLimitedProvider("provider_a")
     provider_b = RateLimitedProvider("provider_b")
 
+    cooldown_mgr = CooldownManager(catalog=FAKE_CATALOG)
     registry = _make_registry({
         "provider_a": (provider_a, ["key_a_0"]),
         "provider_b": (provider_b, ["key_b_0"]),
-    })
-    cooldown_mgr = CooldownManager(catalog=FAKE_CATALOG)
+    }, cooldown_mgr)
     queue_mgr = QueueManager(max_wait_seconds=3.0)
     config = _make_config(["provider_a", "provider_b"], max_wait=3.0)
     request = _make_request()
 
     # Pre-mark both providers as cooling for 200 s (effectively forever).
-    cooldown_mgr._set_cooling("provider_a", 0, time.monotonic() + 200.0)
-    cooldown_mgr._set_cooling("provider_b", 0, time.monotonic() + 200.0)
+    with cooldown_mgr._lock:
+        cooldown_mgr._cooling[("provider_a", 0)] = time.monotonic() + 200.0
+        cooldown_mgr._cooling[("provider_b", 0)] = time.monotonic() + 200.0
     # on_upstream_429 will call on_429("provider_a", 0, None) which overwrites
     # provider_a's cooling entry, but with backoff_base_seconds=100 the new
     # cooldown is also effectively forever (100 * 2^0 = 100 s).

@@ -42,6 +42,31 @@ class UpstreamRateLimitError(Exception):
         super().__init__(f"upstream 429 (retry_after={retry_after!r})")
 
 
+class ProviderConnectionError(Exception):
+    """Raised when a provider cannot be reached at all (network error, DNS failure, etc.)."""
+
+    def __init__(self, message: str = "Provider connection failed") -> None:
+        super().__init__(message)
+
+
+class ProviderHTTPError(Exception):
+    """
+    Raised for non-429 HTTP error responses from the upstream provider
+    (4xx other than 429, 5xx, unexpected status codes).
+    """
+
+    def __init__(self, status_code: int, message: str = "") -> None:
+        self.status_code = status_code
+        super().__init__(f"HTTP {status_code}: {message}" if message else f"HTTP {status_code}")
+
+
+class ProviderTimeoutError(Exception):
+    """Raised when the upstream provider request times out."""
+
+    def __init__(self, message: str = "Provider request timed out") -> None:
+        super().__init__(message)
+
+
 class BaseProvider(ABC):
     """
     Abstract base for all provider transports.

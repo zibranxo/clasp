@@ -213,7 +213,7 @@ class ProviderRegistry:
         if name not in self._registration_order:
             self._registration_order.append(name)
         logger.debug("registry: registered provider", provider=name,
-                     cls=type(instance).__name__, keys=len(key_pool))
+                     cls=type(instance).__name__, keys=len(key_pool.keys))
 
     def _clear(self) -> None:
         self._providers.clear()
@@ -269,6 +269,11 @@ def build_registry(settings: "Settings") -> ProviderRegistry:
     are instantiated.  All other providers are silently skipped so a typo in
     ``config.yaml`` never prevents the server from starting.
 
+    Build is performed into a *new* ``ProviderRegistry`` instance; the
+    module-level ``_registry`` singleton is only replaced atomically once the
+    new registry is fully built, so concurrent readers never observe an empty
+    or partially-populated state.
+
     Parameters
     ----------
     settings:
@@ -277,19 +282,19 @@ def build_registry(settings: "Settings") -> ProviderRegistry:
     Returns
     -------
     ProviderRegistry
-        The now-populated module-level singleton (same object as ``_registry``).
+        The now-populated module-level singleton.
     """
     global _registry
-    _registry._clear()
+    new_registry = ProviderRegistry()
 
-    for provider_name in settings.provider_chain:
+    for provider_name in settings.provider_chain:  # noqa: C901
         provider_cfg = settings.providers.get(provider_name)
         if provider_cfg is None:
             logger.debug(
                 "registry: provider in chain has no config, skipping",
                 provider=provider_name,
             )
-            continue
+            continue  # type: ignore[misc]
 
         if not provider_cfg.enabled:
             logger.debug(
@@ -327,14 +332,19 @@ def build_registry(settings: "Settings") -> ProviderRegistry:
         # Resolve and instantiate the provider class.
         cls = _transport_class(provider_name)
         try:
-            # Prefer passing base_url from catalog if the constructor accepts it.
-            kwargs: dict[str, Any] = {}
-            if catalog_profile is not None:
-                kwargs["base_url"] = provider_cfg.base_url or catalog_profile.base_url
+            # All transport classes (OpenAIChatTransport, AnthropicMessagesTransport,
+            # NvidiaProvider) require both `name` and `base_url` as positional kwargs.
+            base_url = (provider_cfg.base_url if provider_cfg.base_url else None) or (
+                catalog_profile.base_url if catalog_profile else ""
+            )
+            kwargs: dict[str, Any] = {
+                "name": provider_name,
+                "base_url": base_url,
+            }
 
             instance = cls(**kwargs)
             key_pool = KeyPool(provider_name, pool_keys, effective_profile)
-            _registry._register(provider_name, instance, key_pool)
+            new_registry._register(provider_name, instance, key_pool)
         except Exception as exc:  # noqa: BLE001
             logger.error(
                 "registry: failed to instantiate provider — skipping",
@@ -344,11 +354,20 @@ def build_registry(settings: "Settings") -> ProviderRegistry:
             )
             continue
 
+    # Atomic swap — readers always see either the old complete registry or the
+    # new complete one, never an empty intermediate state.
+    _registry = new_registry
+
     logger.info(
         "registry: build complete",
         registered=_registry.all_enabled(),
         total=len(_registry),
     )
+    return _registry
+
+
+def get_registry() -> ProviderRegistry:
+    """Return the current module-level registry singleton."""
     return _registry
 
 
@@ -372,8 +391,9 @@ def rebuild(settings: "Settings") -> ProviderRegistry:
     Hot-reload: teardown and rebuild the registry from refreshed *settings*.
 
     Called by ``config/watcher.py`` after a config change is detected.
-    Thread-safe for reads that happen concurrently — the module-level ``_registry``
-    object is replaced atomically (CPython GIL) once the new one is fully built.
+    Thread-safe for reads that happen concurrently — ``build_registry()``
+    builds the new registry into a separate object and only swaps
+    ``_registry`` atomically once fully built.
     """
     logger.info("registry: rebuilding from updated settings")
     return build_registry(settings)

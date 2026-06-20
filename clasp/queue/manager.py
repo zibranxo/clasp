@@ -109,12 +109,12 @@ class QueueManager:
                         await asyncio.sleep(self.drain_poll_interval)
                 else:
                     provider, key, key_idx = selection
-                    chunks: list[bytes] = []
+                    chunks: list[str] = []
                     try:
                         async for chunk in provider.stream(
                             req.request, key=key, key_index=key_idx
                         ):
-                            raw = chunk if isinstance(chunk, bytes) else chunk.encode()
+                            raw = chunk.decode("utf-8") if isinstance(chunk, bytes) else chunk
                             chunks.append(raw)
                         req.future.set_result(chunks)
                     except Exception as e:  # noqa: BLE001

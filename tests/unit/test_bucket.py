@@ -20,7 +20,6 @@ CI config in plan.md §18.)
 from __future__ import annotations
 
 import asyncio
-
 import pytest
 
 from clasp.ratelimit.bucket import TokenBucket
@@ -143,9 +142,9 @@ async def test_refill_never_exceeds_capacity():
 # ---------------------------------------------------------------------------
 
 async def test_concurrent_consume_never_over_consumes():
-    # 20 tasks each try to consume once from a bucket with only 10 RPM
-    # capacity. The asyncio.Lock inside TokenBucket must serialise access so
-    # that at most 10 of the 20 "win" (rpm_used never exceeds capacity).
+    # 20 tasks each try to atomically reserve from a bucket with only 10 RPM
+    # capacity. try_consume() serialises both check and deduct under one lock
+    # so at most 10 of the 20 succeed — no over-admission possible.
     # soft_threshold=1.0 fully disables the soft-threshold gate (it's tested
     # separately above) so this test purely measures raw capacity safety.
     bucket = TokenBucket(rpm_limit=10, tpm_limit=None, soft_threshold=1.0)
@@ -155,8 +154,8 @@ async def test_concurrent_consume_never_over_consumes():
 
     async def worker() -> None:
         nonlocal granted
-        if await bucket.can_consume():
-            await bucket.consume()
+        # try_consume() is atomic: check + deduct in one lock acquisition.
+        if await bucket.try_consume():
             async with lock:
                 granted += 1
 
@@ -169,7 +168,7 @@ async def test_concurrent_consume_never_over_consumes():
     assert granted == 10, f"expected exactly 10 grants, got {granted}"
     assert bucket.rpm_tokens == pytest.approx(0.0, abs=0.01)
     # int(capacity - rpm_tokens) truncates, and lazy refill means a sliver of
-    # wall-clock time has elapsed since the last consume() by now — same
+    # wall-clock time has elapsed since the last try_consume() by now — same
     # truncation hazard as test_rpm_used_property_tracks_consumption above.
     assert bucket.rpm_used in (9, 10)
 
@@ -184,8 +183,8 @@ async def test_concurrent_consume_respects_lock_under_heavy_contention():
 
     async def worker() -> None:
         nonlocal granted
-        if await bucket.can_consume(estimated_tokens=50):
-            await bucket.consume(estimated_tokens=50)
+        # try_consume() atomically checks RPM *and* TPM then deducts both.
+        if await bucket.try_consume(estimated_tokens=50):
             async with lock:
                 granted += 1
 

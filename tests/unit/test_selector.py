@@ -50,18 +50,18 @@ Coverage:
 from __future__ import annotations
 
 import asyncio
-import sys
 import os
+import sys
 import time
 import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
 from clasp.ratelimit.bucket import TokenBucket
-from clasp.ratelimit.cooldown import CooldownStore
-from clasp.ratelimit.circuit_breaker import CircuitBreakerStore
-from clasp.router.model_map import resolve as resolve_model, parse_by_type_entry
-from clasp.router.selector import KeyPool, RequestView, select
+from clasp.ratelimit.cooldown import CooldownManager
+from clasp.ratelimit.key_pool import KeyPool
+from clasp.router.model_map import resolve_model
+from clasp.router.selector import select
 
 
 # ---------------------------------------------------------------------------
@@ -112,7 +112,25 @@ def _make_caps(**kwargs):
 
 
 def _make_pool(provider_name, keys, rpm=40, tpm=None, soft=0.80):
-    return KeyPool(provider_name, keys, rpm, tpm, soft)
+    from clasp.config.provider_catalog import ProviderProfile
+    profile = ProviderProfile(
+        display_name=provider_name,
+        base_url="https://example.com/v1",
+        transport="openai_chat",
+        rpm_limit=rpm,
+        tpm_limit=tpm,
+        daily_token_limit=None,
+        rpm_soft_threshold=soft,
+        cooldown_seconds=5,
+        backoff_base_seconds=5,
+        supports_tools=True,
+        supports_vision=True,
+        supports_thinking=True,
+        max_context_tokens=200_000,
+        tier="free",
+        free_tier_note="test",
+    )
+    return KeyPool(provider_name, keys, profile, cooldown_tracker=CooldownManager())
 
 
 # ---------------------------------------------------------------------------

@@ -51,11 +51,11 @@ from clasp.providers.common.error_mapper import ErrorType, build_anthropic_error
 from clasp.providers.common.token_counter import estimate_request_tokens
 
 try:
-    from clasp.api.detect import classify as _default_detect  # v1 style
+    from clasp.api.detect import detect as _default_detect
 except ImportError:  # pragma: no cover
-    from clasp.api.detect import detect as _default_detect  # type: ignore
+    _default_detect = None  # type: ignore[assignment]
 
-from clasp.api.detect import needs_tools, needs_vision, priority_for
+from clasp.router.types import AnthropicRequest
 
 
 # ---------------------------------------------------------------------------
@@ -114,22 +114,14 @@ async def dispatch_stream(
             )
 
     # ── classify + route (only reached on a cache miss) ───────────────────
-    if detect_fn is None:
-        detect_fn = _default_detect
     if select_fn is None:
         from clasp.router.selector import select as select_fn  # type: ignore[import]
 
     try:
-        request_type = await _maybe_await(detect_fn(request))
-        request_type_value = getattr(request_type, "value", request_type)
-
-        enriched_request = _build_routing_request(
-            request,
-            request_id=request_id,
-            request_type=request_type_value,
-        )
-
-        selection = await select_fn(enriched_request)
+        # Build an AnthropicRequest from the raw body so selector gets the
+        # classified + enriched request shape it expects.
+        anthropic_request = AnthropicRequest.from_body(request)
+        selection = await select_fn(anthropic_request)
     except Exception as exc:  # noqa: BLE001
         if _LOG:
             _logger.error(
@@ -140,7 +132,7 @@ async def dispatch_stream(
             )
         yield _error_event(
             ErrorType.SERVER_ERROR,
-            f"Request classification/routing failed: {exc}",
+            "Request classification/routing failed.",
         )
         return
 
@@ -150,7 +142,6 @@ async def dispatch_stream(
                 "service: no provider available",
                 request_id=request_id,
                 model=request.get("model"),
-                type=enriched_request.get("request_type"),
             )
         yield _error_event(
             ErrorType.OVERLOADED,
@@ -159,36 +150,45 @@ async def dispatch_stream(
         return
 
     provider, api_key, key_index = selection
+    # Retrieve key_pool for outcome feedback after dispatch.
+    from clasp.providers.registry import get_registry  # noqa: PLC0415
+    _kp = get_registry().get_key_pool(getattr(provider, "provider_name", ""))
 
-    # ── STEP 9 (pre-dispatch): request-shaping optimizer passes ──────────
+    # ── STEP 9 (pre-dispatch): request-shaping optimizer passes ────────
     if optimize_fn is None:
-        from clasp.optimizer import optimize as optimize_fn  # type: ignore[import]
+        try:
+            from clasp.optimizer import optimize as optimize_fn  # type: ignore[import]
+        except ImportError:  # pragma: no cover
+            optimize_fn = None  # type: ignore[assignment]
 
-    try:
-        optimized_request = await _maybe_await(
-            optimize_fn(enriched_request, provider_name=getattr(provider, "name", None))
-        )
-    except Exception as exc:  # noqa: BLE001
-        if _LOG:
-            _logger.error(
-                "service: optimize failed",
-                request_id=request_id,
-                provider=getattr(provider, "name", None),
-                error=str(exc),
+    if optimize_fn is not None:
+        try:
+            optimized = await _maybe_await(
+                optimize_fn(anthropic_request.body, provider_name=getattr(provider, "provider_name", None))
             )
-        yield _error_event(
-            ErrorType.SERVER_ERROR,
-            f"Request optimization failed: {exc}",
-        )
-        return
+            if isinstance(optimized, dict):
+                # Optimizer returned a modified body — patch it back onto the request.
+                from dataclasses import replace as _replace  # noqa: PLC0415
+                anthropic_request = _replace(anthropic_request, body=optimized)
+        except Exception as exc:  # noqa: BLE001
+            if _LOG:
+                _logger.error(
+                    "service: optimize failed (continuing with original body)",
+                    request_id=request_id,
+                    provider=getattr(provider, "provider_name", None),
+                    error=str(exc),
+                )
+            # Optimization is best-effort — don't abort the request on failure.
 
     # ── dispatch + collect (so we can write a complete entry to cache) ───
     collected: list[bytes] = []
     success = False
+    actual_tokens: int = 0
+    estimated_tokens: int = anthropic_request.estimated_tokens
 
     try:
         async for chunk in provider.stream(
-            optimized_request, key=api_key, key_index=key_index
+            anthropic_request, key=api_key, key_index=key_index
         ):
             raw = chunk if isinstance(chunk, bytes) else chunk.encode()
             collected.append(raw)
@@ -199,26 +199,42 @@ async def dispatch_stream(
             _logger.error(
                 "service: provider stream failed",
                 request_id=request_id,
-                provider=getattr(provider, "name", None),
+                provider=getattr(provider, "provider_name", None),
                 key_index=key_index,
                 error=str(exc),
             )
         err = _error_event(
             ErrorType.SERVER_ERROR,
-            f"Upstream provider error: {exc}",
+            "Upstream provider error.",
         )
         collected.append(err)
         yield err
     finally:
+        # Outcome feedback — keeps circuit breaker and TPM bucket in sync.
+        if _kp is not None:
+            if success:
+                _kp.record_success(key_index)
+                # TPM reconciliation: try to parse actual token usage from the
+                # collected SSE stream so consume_actual() can correct the
+                # pre-flight estimate.  Falls back silently if unparseable.
+                try:
+                    actual_tokens = _parse_actual_tokens(collected)
+                    if actual_tokens > 0:
+                        await _kp.buckets[key_index].consume_actual(
+                            actual=actual_tokens, estimated=estimated_tokens
+                        )
+                except Exception:  # noqa: BLE001
+                    pass
+            else:
+                _kp.record_error(key_index)
         if _LOG:
             _logger.info(
                 "service: request complete",
                 request_id=request_id,
-                provider=getattr(provider, "name", None),
+                provider=getattr(provider, "provider_name", None),
                 key_index=key_index,
                 stream=True,
                 success=success,
-                type=enriched_request.get("request_type"),
             )
 
     # ── STEP 9 (post-dispatch): cache the complete, successful response ──
@@ -324,16 +340,14 @@ def _build_routing_request(
     request_type: Any,
 ) -> dict[str, Any]:
     """
-    Add routing metadata from v2 without changing the v1 routing contract.
+    Legacy helper kept for backward compat with any code that still calls it.
+    The main dispatch path now uses AnthropicRequest.from_body() instead.
     """
     enriched_request = dict(request)
     enriched_request["request_id"] = request_id
     enriched_request["request_type"] = request_type
     enriched_request.setdefault("type", request_type)
     enriched_request["estimated_tokens"] = estimate_request_tokens(request)
-    enriched_request["needs_tools"] = needs_tools(request)
-    enriched_request["needs_vision"] = needs_vision(request)
-    enriched_request["priority"] = priority_for(request_type)
     return enriched_request
 
 
@@ -341,6 +355,31 @@ def _error_event(error_type: ErrorType, message: str) -> bytes:
     """One Anthropic-format ``event: error`` SSE block."""
     payload = build_anthropic_error(error_type, message)
     return f"event: error\ndata: {json.dumps(payload)}\n\n".encode()
+
+
+def _parse_actual_tokens(chunks: list[bytes]) -> int:
+    """
+    Scan collected SSE chunks for a ``message_delta`` event with a
+    ``usage.output_tokens`` field and return the count, or 0 if not found.
+    """
+    import json as _json
+
+    for raw in chunks:
+        text = raw.decode(errors="replace")
+        for line in text.splitlines():
+            line = line.strip()
+            if not line.startswith("data:"):
+                continue
+            try:
+                event = _json.loads(line[5:].strip())
+            except _json.JSONDecodeError:
+                continue
+            if event.get("type") == "message_delta":
+                usage = event.get("usage", {})
+                tokens = usage.get("output_tokens")
+                if isinstance(tokens, int) and tokens > 0:
+                    return tokens
+    return 0
 
 
 async def _maybe_await(value: Any) -> Any:
