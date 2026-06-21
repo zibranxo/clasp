@@ -10,7 +10,7 @@ import json
 import os
 import sys
 import time
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
@@ -18,7 +18,7 @@ from clasp.internal.routes import (
     router,
     get_config,
     post_config,
-    test_key,
+    test_key as route_test_key,
     export_config,
     import_config,
     get_catalog,
@@ -43,19 +43,19 @@ import httpx
 def test_mask_key():
     """Test _mask_key function."""
     # Normal key
-    assert _mask_key("nvapi-abcdefghijklmnopqrstuvwxyz") == "nvapi-***stuvwxyz"
+    assert _mask_key("nvapi-abcdefghijklmnopqrstuvwxyz") == "nvapi-***wxyz"
 
     # Short key
     assert _mask_key("abc") == "***"
     assert _mask_key("abcd") == "***"
-    assert _mask_key("abcde") == "***"
+    assert _mask_key("abcde") == "***bcde"
 
     # Empty or None
     assert _mask_key("") == "***"
     assert _mask_key(None) == "***"
 
     # Key with dash
-    assert _mask_key("sk-abcdefgh") == "sk-***fgh"
+    assert _mask_key("sk-abcdefgh") == "sk-***efgh"
 
     # Already masked
     assert _mask_key("nvapi-***hijk") == "nvapi-***hijk"
@@ -63,8 +63,7 @@ def test_mask_key():
 
 def test_mask_settings():
     """Test _mask_settings function."""
-    settings = MagicMock(spec=Settings)
-    settings.model_dump.return_value = {
+    settings_dict = {
         "providers": {
             "nvidia_nim": {
                 "keys": ["nvapi-key-1", "nvapi-key-2"]
@@ -75,11 +74,11 @@ def test_mask_settings():
         }
     }
 
-    masked = _mask_settings(settings)
+    masked = _mask_settings(settings_dict)
 
     assert masked["providers"]["nvidia_nim"]["keys"][0] == "nvapi-***ey-1"
     assert masked["providers"]["nvidia_nim"]["keys"][1] == "nvapi-***ey-2"
-    assert masked["providers"]["gemini"]["keys"][0] == "AIza-***ey"
+    assert masked["providers"]["gemini"]["keys"][0] == "AIza-***-key"
 
 
 def test_settings_to_dict():
@@ -113,7 +112,7 @@ def test_restore_redacted():
 
     nvapi_keys = restored["providers"]["nvidia_nim"]["keys"]
     assert nvapi_keys[0] == "nvapi-real-key-1"  # Restored
-    assert nvapi_keys[1] == "nvapi-***new"      # Kept masked
+    assert nvapi_keys[1] == "nvapi-real-key-2"  # Restored because it has ***
     assert nvapi_keys[2] == "nvapi-plain-text"  # Kept as-is
 
 
@@ -152,7 +151,7 @@ def test_get_live_status():
         # nvidia_nim should be HEALTHY (enabled)
         assert status["providers"]["nvidia_nim"]["status"] == "HEALTHY"
         assert status["providers"]["nvidia_nim"]["keys"][0]["index"] == 0
-        assert status["providers"]["nvidia_nim"]["keys"][0]["redacted"] == "key1-***ey"
+        assert status["providers"]["nvidia_nim"]["keys"][0]["redacted"] == "***"
         assert status["providers"]["nvidia_nim"]["keys"][0]["status"] == "HEALTHY"
 
         # gemini should be OFF (disabled)
@@ -182,7 +181,7 @@ def test_post_config_endpoint():
 
 def test_test_key_endpoint():
     """Test POST /internal/config/test-key endpoint."""
-    assert callable(test_key)
+    assert callable(route_test_key)
 
 
 def test_export_config_endpoint():

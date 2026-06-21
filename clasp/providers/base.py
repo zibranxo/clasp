@@ -76,6 +76,15 @@ class BaseProvider(ABC):
 
     provider_name: str
 
+    def __init__(self, name: str, base_url: str, timeout_seconds: float = 60.0) -> None:
+        import httpx
+        self.name = name
+        self.base_url = base_url.rstrip("/")
+        self.client = httpx.AsyncClient(timeout=timeout_seconds)
+
+    async def aclose(self) -> None:
+        await self.client.aclose()
+
     @abstractmethod
     def _stream_raw(
         self,

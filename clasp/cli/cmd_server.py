@@ -106,7 +106,7 @@ def run(
     from clasp.server import create_app
 
     uv_config = uvicorn.Config(
-        app=create_app(log_level=log_level, debug=debug),
+        app=create_app(debug=debug),
         host=effective_host,
         port=effective_port,
         log_level=log_level.lower(),

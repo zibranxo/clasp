@@ -90,7 +90,7 @@ from clasp.config.provider_catalog import PROVIDER_CATALOG, ProviderProfile
 from clasp.providers.base import BaseProvider
 from clasp.providers.openai_transport import OpenAIChatTransport
 from clasp.providers.anthropic_transport import AnthropicMessagesTransport
-from clasp.providers.nvidia_nim import NvidiaProvider
+from clasp.providers.nvidia_nim import NvidiaNimProvider
 from clasp.ratelimit.key_pool import KeyPool
 
 if TYPE_CHECKING:
@@ -105,7 +105,7 @@ if TYPE_CHECKING:
 # ---------------------------------------------------------------------------
 
 PROVIDER_CLASS_MAP: dict[str, type[BaseProvider]] = {
-    "nvidia_nim": NvidiaProvider,
+    "nvidia_nim": NvidiaNimProvider,
     # Sprint 4 providers — use generic transports until concrete classes land:
     "gemini": OpenAIChatTransport,
     "cerebras": OpenAIChatTransport,
@@ -333,7 +333,7 @@ def build_registry(settings: "Settings") -> ProviderRegistry:
         cls = _transport_class(provider_name)
         try:
             # All transport classes (OpenAIChatTransport, AnthropicMessagesTransport,
-            # NvidiaProvider) require both `name` and `base_url` as positional kwargs.
+            # NvidiaNimProvider) require both `name` and `base_url` as positional kwargs.
             base_url = (provider_cfg.base_url if provider_cfg.base_url else None) or (
                 catalog_profile.base_url if catalog_profile else ""
             )

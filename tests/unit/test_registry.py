@@ -18,7 +18,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 from clasp.config.settings import Settings, ServerConfig, RoutingConfig, ProviderConfig
 from clasp.providers import registry
 from clasp.providers.base import BaseProvider
-from clasp.providers.nvidia_nim import NvidiaProvider
+from clasp.providers.nvidia_nim import NvidiaNimProvider
 from clasp.providers.openai_transport import OpenAIChatTransport
 from clasp.providers.anthropic_transport import AnthropicMessagesTransport
 
@@ -43,7 +43,7 @@ class TestBuildRegistryBasic(unittest.TestCase):
         )
         reg = registry.build_registry(settings)
         self.assertIn("nvidia_nim", reg.all_enabled())
-        self.assertIsInstance(reg.get("nvidia_nim"), NvidiaProvider)
+        self.assertIsInstance(reg.get("nvidia_nim"), NvidiaNimProvider)
 
     def test_disabled_provider_is_skipped(self):
         settings = _settings(
@@ -114,7 +114,7 @@ class TestTransportClassResolution(unittest.TestCase):
             providers={"nvidia_nim": ProviderConfig(enabled=True, keys=["k"])},
         )
         reg = registry.build_registry(settings)
-        self.assertIsInstance(reg.get("nvidia_nim"), NvidiaProvider)
+        self.assertIsInstance(reg.get("nvidia_nim"), NvidiaNimProvider)
 
     def test_gemini_falls_back_to_openai_transport(self):
         settings = _settings(
@@ -231,20 +231,20 @@ class TestProviderRegistryClassDirectly(unittest.TestCase):
     def test_len_reflects_registered_count(self):
         reg = registry.ProviderRegistry()
         self.assertEqual(len(reg), 0)
-        reg._register("nvidia_nim", NvidiaProvider())
+        reg._register("nvidia_nim", NvidiaNimProvider())
         self.assertEqual(len(reg), 1)
 
     def test_clear_resets_state(self):
         reg = registry.ProviderRegistry()
-        reg._register("nvidia_nim", NvidiaProvider())
+        reg._register("nvidia_nim", NvidiaNimProvider())
         reg._clear()
         self.assertEqual(len(reg), 0)
         self.assertEqual(reg.all_enabled(), [])
 
     def test_register_same_name_twice_doesnt_duplicate_order_entry(self):
         reg = registry.ProviderRegistry()
-        reg._register("nvidia_nim", NvidiaProvider())
-        reg._register("nvidia_nim", NvidiaProvider())
+        reg._register("nvidia_nim", NvidiaNimProvider())
+        reg._register("nvidia_nim", NvidiaNimProvider())
         self.assertEqual(reg.all_enabled().count("nvidia_nim"), 1)
 
 

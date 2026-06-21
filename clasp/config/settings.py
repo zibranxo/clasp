@@ -111,21 +111,36 @@ class ServerConfig(BaseModel):
     live_tui: bool = False
 
 
+DEFAULT_ROUTING_MODELS = {
+    "opus": "nvidia_nim/moonshotai/kimi-k2-thinking",
+    "sonnet": "nvidia_nim/nvidia/llama-3.1-nemotron-70b-instruct",
+    "haiku": "cerebras/llama3.1-8b",
+    "fable": "gemini/models/gemini-2.5-flash",
+    "default": "nvidia_nim/nvidia/llama-3.1-nemotron-70b-instruct",
+}
+
+DEFAULT_ROUTING_BY_TYPE = {
+    "think": "nvidia_nim/moonshotai/kimi-k2-thinking",
+    "long_context": "gemini/models/gemini-2.5-flash",
+    "background": "groq/llama-3.3-70b-versatile",
+    "vision": "openrouter/google/gemini-2.5-flash-preview:free",
+}
+
 class ModelRoutes(BaseModel):
     """Maps Claude tier names to ``provider/model-slug`` strings."""
-    opus: str = "nvidia_nim/moonshotai/kimi-k2-thinking"
-    sonnet: str = "nvidia_nim/nvidia/llama-3.1-nemotron-70b-instruct"
-    haiku: str = "cerebras/llama3.1-8b"
-    fable: str = "gemini/models/gemini-2.5-flash"
-    default: str = "nvidia_nim/nvidia/llama-3.1-nemotron-70b-instruct"
+    opus: str = DEFAULT_ROUTING_MODELS["opus"]
+    sonnet: str = DEFAULT_ROUTING_MODELS["sonnet"]
+    haiku: str = DEFAULT_ROUTING_MODELS["haiku"]
+    fable: str = DEFAULT_ROUTING_MODELS["fable"]
+    default: str = DEFAULT_ROUTING_MODELS["default"]
 
 
 class ByTypeRoutes(BaseModel):
     """Optional per-request-type overrides."""
-    think: str = "nvidia_nim/moonshotai/kimi-k2-thinking"
-    long_context: str = "gemini/models/gemini-2.5-flash"
-    background: str = "groq/llama-3.3-70b-versatile"
-    vision: str = "openrouter/google/gemini-2.5-flash-preview:free"
+    think: str = DEFAULT_ROUTING_BY_TYPE["think"]
+    long_context: str = DEFAULT_ROUTING_BY_TYPE["long_context"]
+    background: str = DEFAULT_ROUTING_BY_TYPE["background"]
+    vision: str = DEFAULT_ROUTING_BY_TYPE["vision"]
 
 
 class RoutingConfig(BaseModel):
@@ -258,18 +273,21 @@ class Settings(BaseSettings):
         env = os.environ
 
         # Server shortcuts
+        server_updates = {}
         if port_str := env.get("CLASP_PORT"):
             try:
-                self.server.model_fields_set  # ensure server is mutable
-                object.__setattr__(self.server, "port", int(port_str))
+                server_updates["port"] = int(port_str)
             except ValueError:
                 logger.warning("CLASP_PORT is not a valid integer", value=port_str)
 
         if api_key := env.get("CLASP_API_KEY"):
-            object.__setattr__(self.server, "api_key", api_key)
+            server_updates["api_key"] = api_key
 
         if log_level := env.get("CLASP_LOG_LEVEL"):
-            object.__setattr__(self.server, "log_level", log_level.upper())
+            server_updates["log_level"] = log_level.upper()
+
+        if server_updates:
+            self.server = self.server.model_copy(update=server_updates)
 
         # Provider key injection from environment
         _KEY_ENV_VARS: dict[str, str] = {
@@ -299,12 +317,7 @@ class Settings(BaseSettings):
             for k in injected_keys:
                 if k not in existing:
                     existing.append(k)
-            # Using object.__setattr__ because ProviderConfig is a regular BaseModel
-            # (not frozen) — direct attribute assignment works, but being explicit
-            # keeps linters happy.
-            pcfg.keys = existing
-            if injected_keys:
-                pcfg.enabled = True
+            self.providers[provider_name] = pcfg.model_copy(update={"keys": existing, "enabled": True})
 
         return self
 
@@ -325,7 +338,8 @@ class Settings(BaseSettings):
         init_settings: PydanticBaseSettingsSource,
         env_settings: PydanticBaseSettingsSource,
         dotenv_settings: PydanticBaseSettingsSource,
-        secrets_settings: PydanticBaseSettingsSource,
+        file_secret_settings: PydanticBaseSettingsSource,
+        **kwargs: Any,
     ) -> tuple[PydanticBaseSettingsSource, ...]:
         # Priority: init > env > YAML > defaults (secrets omitted)
         return (

@@ -10,14 +10,7 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.modules.pop("clasp", None)
 sys.path.insert(0, str(ROOT))
 
-import types
 
-sys.modules.setdefault(
-    "loguru",
-    types.SimpleNamespace(
-        logger=types.SimpleNamespace(debug=lambda *a, **k: None, warning=lambda *a, **k: None)
-    ),
-)
 
 from clasp.providers.anthropic_transport import AnthropicMessagesTransport
 from clasp.providers.base import ProviderHTTPError
@@ -95,35 +88,35 @@ def test_build_headers_with_and_without_authorization_mode() -> None:
 @pytest.mark.asyncio
 async def test_stream_forwards_text_chunks() -> None:
     transport = AnthropicMessagesTransport("x", "https://api.example/v1/messages")
-    transport._client = _FakeClient(stream_response=_FakeResponse(chunks=["a", "", "b"]))
+    transport.client = _FakeClient(stream_response=_FakeResponse(chunks=["a", "", "b"]))
 
     out: list[str] = []
-    async for chunk in transport.stream({"messages": []}, api_key="k", model="m"):
+    async for chunk in transport.stream({"messages": [], "model": "m"}, key="k", key_index=0):
         out.append(chunk)
 
     assert out == ["a", "b"]
 
 
 @pytest.mark.asyncio
-async def test_stream_429_raises_provider_http_error() -> None:
+async def test_stream_429_raises_upstream_rate_limit_error() -> None:
     transport = AnthropicMessagesTransport("x", "https://api.example/v1/messages")
-    transport._client = _FakeClient(
+    transport.client = _FakeClient(
         stream_response=_FakeResponse(status_code=429, headers={"retry-after": "9"}, body=b"ratelimited")
     )
 
-    with pytest.raises(ProviderHTTPError) as exc:
-        async for _ in transport.stream({"messages": []}, api_key="k", model="m"):
+    from clasp.providers.base import UpstreamRateLimitError
+    with pytest.raises(UpstreamRateLimitError) as exc:
+        async for _ in transport._stream_raw({"messages": [], "model": "m"}, key="k", key_index=0):
             pass
 
-    assert exc.value.status_code == 429
-    assert exc.value.retry_after == 9.0
+    assert exc.value.retry_after == "9.0"
 
 
 @pytest.mark.asyncio
 async def test_list_models_uses_cache() -> None:
     transport = AnthropicMessagesTransport("x", "https://api.example/v1/messages")
     fake_client = _FakeClient(get_response=_FakeResponse(json_data={"data": [{"id": "a"}]}))
-    transport._client = fake_client
+    transport.client = fake_client
 
     first = await transport.list_models(api_key="k")
     second = await transport.list_models(api_key="k")

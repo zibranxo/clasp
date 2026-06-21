@@ -348,7 +348,7 @@ def anthropic_to_openai(
     Returns:
         A dict ready to be serialised and sent to an OpenAI-compatible endpoint.
     """
-    request = copy.deepcopy(request)
+    # request is treated as read-only, avoiding expensive deepcopy
 
     # ── System prompt ──────────────────────────────────────────────────── #
     system_text: str | None = None
@@ -379,6 +379,8 @@ def anthropic_to_openai(
                     first["content"] = [
                         {"type": "text", "text": f"<system>\n{system_text}\n</system>\n\n"}
                     ] + existing
+                else:
+                    raise ValueError(f"Malformed user message content for merge_system: {type(existing)}")
             # If first message isn't user (unusual), prepend a synthetic user message
             elif system_text:
                 converted.insert(

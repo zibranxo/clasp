@@ -43,6 +43,7 @@ from clasp.providers.base import (
     ProviderConnectionError,
     ProviderHTTPError,
     ProviderTimeoutError,
+    UpstreamRateLimitError,
 )
 
 
@@ -179,14 +180,15 @@ class AnthropicMessagesTransport(BaseProvider):
     # stream()
     # ------------------------------------------------------------------ #
 
-    async def stream(
+    async def _stream_raw(
         self,
-        request: dict,
-        *,
-        api_key: str,
-        model: str,
+        request: dict | "AnthropicRequest",
+        key: str,
+        key_index: int,
     ) -> AsyncIterator[str]:
-        payload = dict(request)
+        payload = dict(request) if isinstance(request, dict) else request.model_dump(exclude_none=True)
+        model = request.get("model") if isinstance(request, dict) else request.model
+        api_key = key
         payload["model"] = model
         payload["stream"] = True
 
@@ -204,11 +206,11 @@ class AnthropicMessagesTransport(BaseProvider):
                         if response.status_code == 429
                         else None
                     )
+                    if response.status_code == 429:
+                        raise UpstreamRateLimitError(retry_after=str(retry_after) if retry_after is not None else None)
                     raise ProviderHTTPError(
                         response.status_code,
                         f"{self.name}: upstream returned {response.status_code}",
-                        retry_after=retry_after,
-                        body=body_text,
                     )
 
                 async for text_chunk in response.aiter_text():

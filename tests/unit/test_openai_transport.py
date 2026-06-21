@@ -10,14 +10,7 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.modules.pop("clasp", None)
 sys.path.insert(0, str(ROOT))
 
-import types
 
-sys.modules.setdefault(
-    "loguru",
-    types.SimpleNamespace(
-        logger=types.SimpleNamespace(debug=lambda *a, **k: None, warning=lambda *a, **k: None)
-    ),
-)
 
 from clasp.providers.base import ProviderHTTPError, ProviderTimeoutError
 from clasp.providers.openai_transport import OpenAIChatTransport, _parse_retry_after
@@ -89,7 +82,7 @@ def test_build_headers_merges_auth_and_extra_headers() -> None:
 async def test_list_models_uses_cache() -> None:
     transport = OpenAIChatTransport("x", "https://api.example")
     fake_client = _FakeClient(get_response=_FakeResponse(json_data={"data": [{"id": "m1"}, {"id": "m2"}]}))
-    transport._client = fake_client  # inject fake
+    transport.client = fake_client  # inject fake
 
     first = await transport.list_models(api_key="k")
     second = await transport.list_models(api_key="k")
@@ -100,20 +93,19 @@ async def test_list_models_uses_cache() -> None:
 
 
 @pytest.mark.asyncio
-async def test_stream_raises_provider_http_error_on_429() -> None:
+async def test_stream_raises_upstream_rate_limit_error_on_429() -> None:
     transport = OpenAIChatTransport("x", "https://api.example")
     fake_client = _FakeClient(
         stream_response=_FakeResponse(status_code=429, headers={"retry-after": "7"}, body=b"too many requests")
     )
-    transport._client = fake_client
+    transport.client = fake_client
 
-    with pytest.raises(ProviderHTTPError) as exc:
-        async for _ in transport.stream({"messages": []}, api_key="k", model="m"):
+    from clasp.providers.base import UpstreamRateLimitError
+    with pytest.raises(UpstreamRateLimitError) as exc:
+        async for _ in transport._stream_raw({"messages": [], "model": "m"}, key="k", key_index=0):
             pass
 
-    assert exc.value.status_code == 429
-    assert exc.value.retry_after == 7.0
-    assert "too many requests" in (exc.value.body or "")
+    assert exc.value.retry_after == "7.0"
 
 
 @pytest.mark.asyncio
@@ -125,8 +117,8 @@ async def test_stream_maps_timeout_exception(monkeypatch: pytest.MonkeyPatch) ->
             raise httpx.ReadTimeout("timed out")
 
     transport = OpenAIChatTransport("x", "https://api.example")
-    transport._client = _TimeoutClient()
+    transport.client = _TimeoutClient()
 
     with pytest.raises(ProviderTimeoutError):
-        async for _ in transport.stream({"messages": []}, api_key="k", model="m"):
+        async for _ in transport.stream({"messages": [], "model": "m"}, key="k", key_index=0):
             pass

@@ -10,18 +10,31 @@ keyword → default), the "provider mismatch returns None" rule, the
 import unittest
 
 from clasp.router.model_map import resolve_model, resolve
-from clasp.router.selector import AnthropicRequest
+from clasp.router.types import AnthropicRequest
 from clasp.api.detect import RequestType
 from clasp.config.settings import Settings, RoutingConfig
 
 
 def _req(model="claude-sonnet-4-5-20250929", request_type=RequestType.INTERACTIVE):
-    return AnthropicRequest(type=request_type, model=model)
+    return AnthropicRequest(body={"model": model}, type=request_type, priority=0)
 
 
 def _settings(models=None, by_type=None):
+    from clasp.config.settings import ModelRoutes, ByTypeRoutes
+    
+    # We use bare instances if empty so defaults don't pollute "no mapping" tests
+    if models == {}:
+        models_obj = ModelRoutes(opus="", sonnet="", haiku="", fable="", default="")
+    else:
+        models_obj = models or {}
+
+    if by_type == {}:
+        by_type_obj = ByTypeRoutes(think="", long_context="", background="", vision="")
+    else:
+        by_type_obj = by_type or {}
+
     return Settings(routing=RoutingConfig(
-        models=models or {}, by_type=by_type or {},
+        models=models_obj, by_type=by_type_obj,
     ))
 
 

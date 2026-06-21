@@ -339,8 +339,9 @@ async def get_catalog() -> dict[str, Any]:
     Contains all supported providers with their free-tier limits and metadata.
     No API keys are present in the catalog.
     """
+    import dataclasses
     return {
-        name: profile.model_dump()
+        name: dataclasses.asdict(profile)
         for name, profile in PROVIDER_CATALOG.items()
     }
 

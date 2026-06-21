@@ -50,10 +50,10 @@ def claude(ctx: typer.Context) -> None:
     so unrecognized flags (--resume, --continue, --print, etc.) land in
     ctx.args instead of causing a Typer parse error.
     """
-    run_claude(list(ctx.args))
+    run(list(ctx.args))
 
 
-def run_claude(passthrough_args: list[str]) -> None:
+def run(passthrough_args: list[str]) -> None:
     claude_bin = shutil.which("claude")
     if not claude_bin:
         sys.exit(

@@ -38,7 +38,7 @@ NVIDIA_NIM_BASE_URL = "https://integrate.api.nvidia.com/v1"
 DEFAULT_KIMI_THINKING_BUDGET_TOKENS = 8000
 
 
-class NvidiaProvider(OpenAIChatTransport):
+class NvidiaNimProvider(OpenAIChatTransport):
     def __init__(
         self,
         *,
@@ -117,4 +117,4 @@ class NvidiaProvider(OpenAIChatTransport):
 
 
 # Export the class for external use
-__all__ = ["NvidiaProvider"]
+__all__ = ["NvidiaNimProvider"]

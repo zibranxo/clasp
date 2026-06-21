@@ -20,8 +20,8 @@ from clasp.config.writer import (
     write_config,
     write_config_dict,
     _mask_key_string,
-    _mask_settings,
-    _restore_redacted,
+    mask_keys,
+    restore_keys,
 )
 from clasp.config.settings import Settings
 
@@ -210,7 +210,7 @@ def test_mask_settings():
     settings.providers["gemini"].enabled = True
     settings.providers["gemini"].keys = ["AIza-test-key"]
 
-    masked = _mask_settings(settings.model_dump())
+    masked = mask_keys(settings)
 
     nvapi_keys = masked["providers"]["nvidia_nim"]["keys"]
     gemini_keys = masked["providers"]["gemini"]["keys"]
@@ -237,7 +237,7 @@ def test_restore_redacted():
         }
     }
 
-    restored = _restore_redacted(incoming, original)
+    restored = restore_keys(incoming, original)
 
     nvapi_keys = restored["providers"]["nvidia_nim"]["keys"]
     assert nvapi_keys[0] == "nvapi-real-key-1"

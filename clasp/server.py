@@ -24,6 +24,8 @@ import asyncio
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
+__version__ = "0.1.0"
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from loguru import logger
@@ -55,6 +57,12 @@ def build_selector_config() -> SelectorConfig:
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     """Startup: launch the queue drain task. Shutdown: cancel it cleanly."""
+    from clasp.config.settings import get_settings
+    from clasp.providers.registry import build_registry
+    
+    settings = get_settings()
+    build_registry(settings)
+    
     config: SelectorConfig = build_selector_config()
     registry: ProviderRegistry = get_registry()
     cooldown_mgr: CooldownManager = get_cooldown_manager()
@@ -111,9 +119,23 @@ def create_app(debug: bool = False) -> FastAPI:
 
     app.include_router(proxy_router)
 
-    # TODO: app.add_middleware(IPGuard) once clasp/utils/ip_guard.py exists.
-    # TODO: app.include_router(internal_router) once clasp/internal/routes.py
-    #       and clasp/ui/routes.py exist.
+    try:
+        from clasp.utils.ip_guard import IPGuard
+        app.add_middleware(IPGuard)
+    except ImportError:
+        pass
+
+    try:
+        from clasp.internal.routes import router as internal_router
+        app.include_router(internal_router)
+    except ImportError:
+        pass
+
+    try:
+        from clasp.ui.routes import router as ui_router
+        app.include_router(ui_router)
+    except ImportError:
+        pass
 
     return app
 

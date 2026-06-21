@@ -121,7 +121,7 @@ def resolve_model(
     by_type: dict[str, str] = _as_dict(getattr(settings.routing, "by_type", None))
 
     # 1. by_type override
-    type_key = getattr(request.type, "value", request.type)
+    type_key = getattr(request.type, "value", request.type).lower()
     override_value = by_type.get(type_key)
     if override_value:
         prov, slug = _split_provider_slug(override_value)

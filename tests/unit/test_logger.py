@@ -27,7 +27,7 @@ def test_setup_logging_basic():
     setup_logging()
 
     # Check that we have sinks
-    assert len(logger.handlers) >= 1
+    assert len(logger._core.handlers) >= 1
 
     # Test logging works
     logger.info("Test message")

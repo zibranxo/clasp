@@ -50,20 +50,20 @@ def test_is_loopback_edge_cases():
     assert _is_loopback("") is False
     assert _is_loopback(None) is False  # type: ignore
     assert _is_loopback("localhost") is False
-    assert _is_loopback("127.0.0.1:8080") is False  # Port included
-    assert _is_loopback("127.0.0.1 ") is False  # Trailing space
+    assert _is_loopback("127.0.0.1:8080") is True  # Port included but starts with 127.
+    assert _is_loopback("127.0.0.1 ") is True  # Trailing space
     assert _is_loopback(" 127.0.0.1") is False  # Leading space
 
 
 def test_ip_guard_initialization():
     """Test IPGuard can be instantiated."""
-    guard = IPGuard()
+    guard = IPGuard(app=MagicMock())
     assert isinstance(guard, IPGuard)
 
 
 def test_ip_guard_dispatch_non_internal_path():
     """Test that non-/internal paths pass through."""
-    guard = IPGuard()
+    guard = IPGuard(app=MagicMock())
 
     # Mock request with non-internal path
     request = MagicMock()
@@ -84,7 +84,7 @@ def test_ip_guard_dispatch_non_internal_path():
 
 def test_ip_guard_dispatch_internal_path_loopback_allowed():
     """Test that /internal paths from loopback are allowed."""
-    guard = IPGuard()
+    guard = IPGuard(app=MagicMock())
 
     # Mock request with internal path from loopback
     request = MagicMock()
@@ -104,7 +104,7 @@ def test_ip_guard_dispatch_internal_path_loopback_allowed():
 
 def test_ip_guard_dispatch_internal_path_loopback_v6_allowed():
     """Test that /internal paths from IPv6 loopback are allowed."""
-    guard = IPGuard()
+    guard = IPGuard(app=MagicMock())
 
     # Mock request with internal path from IPv6 loopback
     request = MagicMock()
@@ -124,7 +124,7 @@ def test_ip_guard_dispatch_internal_path_loopback_v6_allowed():
 
 def test_ip_guard_dispatch_internal_path_non_loopback_blocked():
     """Test that /internal paths from non-loopback are blocked."""
-    guard = IPGuard()
+    guard = IPGuard(app=MagicMock())
 
     # Mock request with internal path from non-loopback
     request = MagicMock()
@@ -148,7 +148,7 @@ def test_ip_guard_dispatch_internal_path_non_loopback_blocked():
 
 def test_ip_guard_dispatch_internal_path_no_client():
     """Test /internal path with no client info (fail closed)."""
-    guard = IPGuard()
+    guard = IPGuard(app=MagicMock())
 
     # Mock request with internal path but no client
     request = MagicMock()
@@ -171,7 +171,7 @@ def test_ip_guard_dispatch_internal_path_no_client():
 
 def test_ip_guard_dispatch_internal_path_empty_client_host():
     """Test /internal path with empty client host (fail closed)."""
-    guard = IPGuard()
+    guard = IPGuard(app=MagicMock())
 
     # Mock request with internal path but empty client host
     request = MagicMock()

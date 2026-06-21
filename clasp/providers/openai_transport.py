@@ -39,6 +39,7 @@ from clasp.providers.base import (
     ProviderConnectionError,
     ProviderHTTPError,
     ProviderTimeoutError,
+    UpstreamRateLimitError,
 )
 from clasp.providers.common.message_converter import anthropic_to_openai
 from clasp.providers.common.sse_builder import SSEBuilder
@@ -173,19 +174,23 @@ class OpenAIChatTransport(BaseProvider):
     # stream()
     # ------------------------------------------------------------------ #
 
-    async def stream(
+    async def _stream_raw(
         self,
-        request: dict,
-        *,
-        api_key: str,
-        model: str,
+        request: dict | "AnthropicRequest",
+        key: str,
+        key_index: int,
     ) -> AsyncIterator[str]:
+        # Handle both dict and AnthropicRequest objects
+        model = request.get("model") if isinstance(request, dict) else request.model
+        api_key = key
+        
+        request_dict = request if isinstance(request, dict) else request.model_dump(exclude_none=True)
         payload = anthropic_to_openai(
-            request,
+            request_dict,
             merge_system=self._should_merge_system(model),
             target_model=model,
         )
-        payload = self._apply_provider_quirks(payload, request=request, model=model)
+        payload = self._apply_provider_quirks(payload, request=request_dict, model=model)
         payload["stream"] = True
         if self.send_stream_options:
             payload["stream_options"] = {"include_usage": True}
@@ -206,19 +211,19 @@ class OpenAIChatTransport(BaseProvider):
                         if response.status_code == 429
                         else None
                     )
+                    if response.status_code == 429:
+                        raise UpstreamRateLimitError(retry_after=str(retry_after) if retry_after is not None else None)
                     raise ProviderHTTPError(
                         response.status_code,
                         f"{self.name}: upstream returned {response.status_code}",
-                        retry_after=retry_after,
-                        body=body_text,
                     )
 
                 async for raw_line in response.aiter_lines():
                     if not raw_line:
                         continue
-                    for event in builder.parse_openai_sse_chunk(raw_line):
+                    for event in builder.process_chunk(raw_line):
                         yield event
-                    if builder.is_done:
+                    if builder.is_done():
                         break
 
         except httpx.TimeoutException as e:
@@ -226,13 +231,13 @@ class OpenAIChatTransport(BaseProvider):
         except httpx.HTTPError as e:
             raise ProviderConnectionError(f"{self.name}: connection error: {e}") from e
 
-        if not builder.is_done:
+        if not builder.is_done():
             # Upstream closed the connection without ever sending a
             # finish_reason chunk (dropped mid-response). Close out the
             # Anthropic-side stream so the client doesn't hang forever
             # waiting for a message_stop that was never coming.
-            logger.warning(f"{self.name}: stream ended without finish_reason, finalizing")
-            for event in builder.finalize():
+            logger.warning(f"{self.name}: stream ended without finish_reason, flushing")
+            for event in builder.flush():
                 yield event
 
     # ------------------------------------------------------------------ #
