@@ -20,11 +20,47 @@ belongs to another user; we treat that as running.
 from __future__ import annotations
 
 import os
+import sys
 from pathlib import Path
 
 from loguru import logger
 
 DEFAULT_PID_PATH: Path = Path.home() / ".clasp" / "clasp.pid"
+
+
+def _pid_exists(pid: int) -> bool | None:
+    """Return True if *pid* is a live process, False if it is dead.
+
+    Returns None if the answer is uncertain (e.g. permission denied —
+    the process exists but is owned by another user).
+
+    Uses Win32 ``OpenProcess`` on Windows to avoid the CPython bug where
+    ``os.kill(pid, 0)`` can raise a ``SystemError`` instead of a normal
+    Python exception for certain dead-process states (WinError 87).
+    """
+    if sys.platform == "win32":
+        import ctypes
+        import ctypes.wintypes
+
+        SYNCHRONIZE = 0x00100000
+        handle = ctypes.windll.kernel32.OpenProcess(SYNCHRONIZE, False, pid)
+        if handle == 0:
+            err = ctypes.windll.kernel32.GetLastError()
+            # ERROR_INVALID_PARAMETER (87) or ERROR_NOT_FOUND — process is gone.
+            # ERROR_ACCESS_DENIED (5) — process exists, we just can't open it.
+            if err == 5:  # ERROR_ACCESS_DENIED
+                return None  # uncertain — treat as alive
+            return False
+        ctypes.windll.kernel32.CloseHandle(handle)
+        return True
+    else:
+        try:
+            os.kill(pid, 0)
+            return True
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            return None  # process exists but owned by another user
 
 
 def write_pid(pid_path: Path = DEFAULT_PID_PATH) -> None:
@@ -65,29 +101,29 @@ def is_running(pid_path: Path = DEFAULT_PID_PATH) -> tuple[bool, int | None]:
         Either the file is absent, or the PID is stale (process is dead).
         Stale files are removed automatically.
 
-    Edge case: if ``os.kill`` raises ``PermissionError`` the process exists
-    (owned by another user); we return ``(True, None)`` — the server is running
-    even if we cannot signal it.
+    Edge case: if we cannot determine ownership (PermissionError / access
+    denied) we assume the process is running and return ``(True, None)``.
     """
     if not pid_path.exists():
         return False, None
 
     try:
         pid = int(pid_path.read_text(encoding="utf-8").strip())
-        os.kill(pid, 0)  # signal 0 = existence check only; raises if dead
-        return True, pid
     except ValueError:
         logger.warning("Stale PID file {} has non-integer content; removing.", pid_path)
         pid_path.unlink(missing_ok=True)
         return False, None
-    except ProcessLookupError:
-        # PID in file is dead — server crashed without cleanup.
-        logger.debug("Stale PID file found at {}; removing.", pid_path)
-        pid_path.unlink(missing_ok=True)
-        return False, None
-    except PermissionError:
-        # Process exists but belongs to another user.
+
+    alive = _pid_exists(pid)
+    if alive is True:
+        return True, pid
+    if alive is None:
+        # Process exists but owned by another user — treat as running.
         return True, None
+    # alive is False — stale PID file.
+    logger.debug("Stale PID file found at {}; removing.", pid_path)
+    pid_path.unlink(missing_ok=True)
+    return False, None
 
 
 def delete_pid(pid_path: Path = DEFAULT_PID_PATH) -> None:

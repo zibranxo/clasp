@@ -53,14 +53,14 @@ def claude(ctx: typer.Context) -> None:
     run(list(ctx.args))
 
 
-def run(passthrough_args: list[str]) -> None:
+def run(passthrough_args: list[str], auto_start: bool = False) -> None:
     claude_bin = shutil.which("claude")
     if not claude_bin:
         sys.exit(
             "claude binary not found. Install: npm install -g @anthropic-ai/claude-code"
         )
 
-    _ensure_server_running()
+    _ensure_server_running(auto_start=auto_start)
 
     from clasp.config.settings import get_settings
 
@@ -88,7 +88,7 @@ def run(passthrough_args: list[str]) -> None:
     # exec replaces this process — nothing below this line ever runs if it succeeds.
 
 
-def _ensure_server_running() -> None:
+def _ensure_server_running(auto_start: bool = False) -> None:
     """Warn and auto-start the CLASP server if it isn't already running.
 
     Prompts for confirmation only when stdin is a TTY (interactive shell);
@@ -102,7 +102,7 @@ def _ensure_server_running() -> None:
     print("⚠ CLASP server is not running.")
 
     should_start = True
-    if sys.stdin.isatty():
+    if not auto_start and sys.stdin.isatty():
         should_start = typer.confirm("Start it now in the background?", default=True)
 
     if not should_start:
