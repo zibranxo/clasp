@@ -61,38 +61,87 @@ Users can provide multiple API keys for a single provider to pool request quotas
 ### Local Payload Optimization
 CLASP identifies and locally answers trivial requests. When Claude Code sends `/v1/models` probes or zero-generation `count_tokens` requests, CLASP returns a fabricated valid response locally. This proxy-level caching saves dozens of external API requests per session.
 
----
+## Usage & CLI Commands
 
-## Command Line Interface (CLI)
+CLASP features a clean, Typer-powered CLI. The workflow uses two processes: a background proxy server (which hosts the dashboard and rate limit engine) and a foreground proxy wrapper that attaches Claude Code to it.
 
-CLASP provides a dual-process workflow. The proxy server runs in the background or a separate pane, while the wrapper executes your actual Claude Code session.
-
-### 1. Starting the Proxy Server
+### 1. Initialization (First Run)
+If this is your first time using CLASP, run the interactive setup wizard. It will create `~/.clasp/config.yaml` with sane defaults, ask you for your primary provider API keys, and automatically launch the proxy server.
 ```bash
-$ clasp server
+$ clasp init
 ```
-**Expected Terminal Output:**
+
+### 2. Starting the Proxy Server
+Start the background server. By default, this runs on `127.0.0.1:8082` and automatically opens the visual configuration dashboard in your default browser.
+
+```bash
+$ clasp server [OPTIONS]
+```
+**Options:**
+- `--port INTEGER`: Change the proxy port (default `8082`).
+- `--host TEXT`: Change the bind address (default `127.0.0.1`).
+- `--no-browser`: Start the server headless without opening the UI dashboard.
+- `--live`: Renders a rich, real-time TUI (Terminal User Interface) live panel directly in the console.
+- `--config PATH`: Path to a custom config file (default `~/.clasp/config.yaml`).
+- `--debug`: Enable verbose debug logging for troubleshooting protocol translation.
+
+**Expected Startup Output:**
 ```text
 ◆ CLASP v1.0.0 starting...
 ✓ Config loaded: ~/.clasp/config.yaml
-✓ Providers: NIM (2 keys), Gemini, Cerebras, Groq
+✓ Providers: NIM (2 keys), Gemini, Cerebras, Groq  [Ollama: not detected]
 ✓ Proxy running at http://127.0.0.1:8082
 ✓ Config UI open at http://127.0.0.1:8082
 → Run `clasp claude` in another terminal to start coding.
+Press Ctrl+C to stop.
 ```
 
-### 2. Launching Claude Code
-The `clasp claude` command acts as a wrapper. It sets the necessary `ANTHROPIC_BASE_URL` and authentication tokens in the environment, then executes the actual `claude` binary via `os.execvp()`. All standard flags pass directly to Claude Code.
+### 3. Launching Claude Code
+Run `clasp claude` to start your Claude session. This command does not spawn a subprocess shell; it uses `os.execvp()` to replace the process with the actual `claude` binary, injecting the local proxy as the Anthropic endpoint.
+
+All standard Claude Code CLI flags are fully supported and passed through transparently:
 
 ```bash
+# Start a fresh coding session
+$ clasp claude
+
+# Resume a specific session by its ID
 $ clasp claude --resume abc123def456
+
+# Continue the most recent session
+$ clasp claude --continue
+
+# Non-interactive single-shot prompt
+$ clasp claude --print "refactor the ratelimit module"
+
+# Skip the Claude Code automatic update check
+$ clasp claude --no-update
 ```
 
-### 3. Monitoring System Status
-For `tmux` or status bar integrations, `clasp status` reads from the local proxy socket:
+### 4. Utility Commands
+
+**Check System Status**
+Designed for `tmux` or custom shell prompts, this command pings the local proxy socket to give you a one-line overview of the rate limit engine and active keys.
 ```bash
 $ clasp status
 [CLASP] NIM(28/40 rpm)→Gemini | Queue:0 | Keys:3/4 healthy | 1.2k req today
+
+# Output as JSON for programmatic use
+$ clasp status --json
+{"status":"healthy","active_provider":"nvidia_nim","rpm_used":28,"rpm_limit":40,"queue_depth":0,"healthy_keys":3,"total_keys":4,"requests_today":1240}
+```
+
+**Graceful Shutdown**
+Safely spin down the proxy. This ensures that the current queue is drained and rate limit state (cooldowns, bucket tokens) is serialized to disk (`~/.clasp/ratelimit.json`) to guarantee mathematical correctness on the next boot.
+```bash
+$ clasp stop
+```
+
+**Reset Circuit Breakers**
+If a provider recovers early or you want to manually flush the exponential backoff cooldowns, you can force a reset.
+```bash
+$ clasp reset              # Reset all providers
+$ clasp reset nvidia_nim   # Reset only the NVIDIA NIM circuit breakers
 ```
 
 ---
@@ -193,7 +242,7 @@ CLASP requires Python 3.11 or higher and uses `uv` for dependency resolution.
 
 ### 1. Clone Repository and Install
 ```bash
-git clone https://github.com/yourusername/clasp.git
+git clone https://github.com/zibranxo/clasp.git
 cd clasp
 uv sync
 ```
