@@ -97,7 +97,10 @@ Press Ctrl+C to stop.
 ```
 
 ### 3. Launching Claude Code
-Run `clasp claude` to start your Claude session. This command does not spawn a subprocess shell; it uses `os.execvp()` to replace the process with the actual `claude` binary, injecting the local proxy as the Anthropic endpoint.
+
+**Important:** You must have the proxy server running in the background before launching Claude Code. 
+
+In a **new, separate terminal window**, run `clasp claude` to start your Claude session. This command does not spawn a subprocess shell; it uses `os.execvp()` to replace the process with the actual `claude` binary, injecting the local proxy as the Anthropic endpoint.
 
 All standard Claude Code CLI flags are fully supported and passed through transparently:
 
@@ -255,9 +258,17 @@ uv run clasp init
 ```
 
 ### 3. Start Local Gateway
-Run the server to begin listening on `127.0.0.1:8082`.
+The system operates using two processes. First, start the background server to begin listening on `127.0.0.1:8082`:
 ```bash
 uv run clasp server
 ```
 
+*(Note: You do not need to install or run external services like Redis or PostgreSQL. All state is managed locally in memory.)*
+
 State is persisted automatically. If you stop the proxy (`uv run clasp stop`), active circuit breakers and cooldown timestamps are serialized to `~/.clasp/ratelimit.json` and restored on the next boot, ensuring API quota math remains strictly accurate across server restarts.
+
+### 4. Launch Claude Code
+Once the gateway is running, open a **separate terminal window** and launch your Claude Code session through the proxy:
+```bash
+uv run clasp claude
+```
