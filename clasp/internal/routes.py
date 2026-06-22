@@ -210,7 +210,7 @@ async def post_config(request: Request) -> dict[str, Any]:
     except Exception as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
-    await asyncio.to_thread(write_config, new_settings.model_dump(mode="json"))
+    await asyncio.to_thread(write_config, new_settings)
 
     # The watchfiles watcher in server.py will pick up the file change and
     # call settings.reload() automatically.  Force a manual reload as well
@@ -314,7 +314,7 @@ async def import_config(request: Request) -> dict[str, Any]:
     except Exception as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
-    await asyncio.to_thread(write_config, new_settings.model_dump(mode="json"))
+    await asyncio.to_thread(write_config, new_settings)
 
     try:
         from clasp.config.settings import reload_settings  # type: ignore[import]

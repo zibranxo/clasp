@@ -84,8 +84,27 @@ def run(passthrough_args: list[str], auto_start: bool = False) -> None:
         os.environ["ANTHROPIC_BASE_URL"],
     )
 
-    os.execvp(claude_bin, [claude_bin] + passthrough_args)
-    # exec replaces this process — nothing below this line ever runs if it succeeds.
+    if sys.platform == "win32":
+        # Windows os.execvp exits the parent process immediately, which causes
+        # the shell (powershell/cmd) to resume and fight with claude for console I/O,
+        # resulting in leaked ANSI/xterm.js DCS sequences on the prompt.
+        # We must use subprocess and wait.
+        #
+        # Note: Do not use signal.signal() to intercept SIGINT, as Windows console
+        # handlers are shared and modifying them can break the child's raw terminal
+        # mode (e.g. Enter key stops working). Instead, let Python catch the
+        # KeyboardInterrupt and simply ignore it so we keep waiting for the child.
+        p = subprocess.Popen([claude_bin] + passthrough_args)
+        while True:
+            try:
+                sys.exit(p.wait())
+            except KeyboardInterrupt:
+                # The child process (Claude) receives the OS Ctrl+C natively and
+                # will handle it. We just need to not abort the wrapper.
+                continue
+    else:
+        os.execvp(claude_bin, [claude_bin] + passthrough_args)
+        # exec replaces this process — nothing below this line ever runs if it succeeds.
 
 
 def _ensure_server_running(auto_start: bool = False) -> None:

@@ -22,7 +22,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
 from clasp.config.provider_catalog import ProviderProfile
 from clasp.providers.registry import ProviderRegistry
-from clasp.ratelimit.cooldown import CooldownTracker
+from clasp.ratelimit.cooldown import CooldownManager
 from clasp.router.selector import select
 
 
@@ -74,7 +74,7 @@ def test_disabled_provider_is_skipped():
     registry.initialize(
         {"alpha": [], "beta": ["key-beta-0"]},
         catalog=catalog,
-        cooldown_tracker=CooldownTracker(),
+        cooldown_tracker=CooldownManager(),
     )
 
     result = _run(select(SIMPLE_REQUEST, provider_chain=["alpha", "beta"], registry=registry, catalog=catalog))
@@ -87,7 +87,7 @@ def test_disabled_provider_is_skipped():
 
 def test_cooling_provider_is_skipped_without_being_tried():
     catalog = {"alpha": _make_profile(), "beta": _make_profile()}
-    tracker = CooldownTracker()
+    tracker = CooldownManager()
     registry = ProviderRegistry()
     registry.initialize(
         {"alpha": ["key-alpha-0"], "beta": ["key-beta-0"]},
@@ -113,7 +113,7 @@ def test_capability_mismatch_vision_is_skipped():
     registry.initialize(
         {"no_vision": ["key-0"], "has_vision": ["key-1"]},
         catalog=catalog,
-        cooldown_tracker=CooldownTracker(),
+        cooldown_tracker=CooldownManager(),
     )
 
     result = _run(
@@ -132,7 +132,7 @@ def test_vision_request_against_only_non_vision_providers_returns_none():
     provider."""
     catalog = {"no_vision": _make_profile(supports_vision=False)}
     registry = ProviderRegistry()
-    registry.initialize({"no_vision": ["key-0"]}, catalog=catalog, cooldown_tracker=CooldownTracker())
+    registry.initialize({"no_vision": ["key-0"]}, catalog=catalog, cooldown_tracker=CooldownManager())
 
     result = _run(select(VISION_REQUEST, provider_chain=["no_vision"], registry=registry, catalog=catalog))
     assert result is None
@@ -140,7 +140,7 @@ def test_vision_request_against_only_non_vision_providers_returns_none():
 
 def test_all_providers_unavailable_returns_none():
     catalog = {"alpha": _make_profile()}
-    tracker = CooldownTracker()
+    tracker = CooldownManager()
     registry = ProviderRegistry()
     registry.initialize({"alpha": ["key-0"]}, catalog=catalog, cooldown_tracker=tracker)
     tracker.on_429("alpha", 0, retry_after_header="120")

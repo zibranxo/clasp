@@ -102,6 +102,9 @@ def _mask_key_string(key: str) -> str:
     if not key or _MASK_SENTINEL in key:
         return key  # already masked or empty
 
+    if len(key) <= 8:
+        return _MASK_SENTINEL
+
     suffix = key[-_KEEP_SUFFIX_LEN:]
     # Find the first dash or use a fixed prefix length.
     dash_idx = key.find("-")
@@ -162,10 +165,11 @@ def restore_keys(
         restored: list[str] = []
         for i, key in enumerate(provider_cfg.get("keys", [])):
             if _is_masked(key):
-                # Restore original at same index if available; skip if not.
+                # Restore original at same index if available; keep as-is if not.
                 if i < len(current_keys):
                     restored.append(current_keys[i])
-                # else: masked key with no original → silently drop
+                else:
+                    restored.append(key)
             else:
                 restored.append(key)
         provider_cfg["keys"] = restored

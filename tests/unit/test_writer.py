@@ -85,7 +85,7 @@ def test_mask_keys():
     assert nvapi_keys[0] == "nvapi-***wxyz"
     assert nvapi_keys[1] == "nvapi-***hijk"
     assert nvapi_keys[2] == "***"  # Short key
-    assert gemini_keys[0] == "AIzaSy***"  # Last 4 chars: "234" -> wait, let me check
+    assert gemini_keys[0] == "AIza-***1234"  # Last 4 chars
     # Actually it should be last 4: "234" but the key is longer
     # "AIzaSyAbcdefghijklmnopqrstuvwxyz1234" -> last 4 is "234"
     # So should be "AIzaSyAbcdefghijklmnopqrstuvwxyz***234"? No, let me recheck the logic
@@ -215,8 +215,8 @@ def test_mask_settings():
     nvapi_keys = masked["providers"]["nvidia_nim"]["keys"]
     gemini_keys = masked["providers"]["gemini"]["keys"]
 
-    assert nvapi_keys[0] == "nvapi-***ey"
-    assert gemini_keys[0] == "AIza-***ey"
+    assert nvapi_keys[0] == "nvapi-***-key"
+    assert gemini_keys[0] == "AIza-***-key"
 
 
 def test_restore_redacted():

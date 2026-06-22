@@ -19,7 +19,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
 from clasp.config.provider_catalog import ProviderProfile
 from clasp.providers.registry import ProviderRegistry
-from clasp.ratelimit.cooldown import CooldownTracker
+from clasp.ratelimit.cooldown import CooldownManager
 from clasp.router.selector import select
 
 
@@ -54,7 +54,7 @@ def test_key_zero_fills_up_key_one_takes_over():
     catalog = {"provider_a": _make_profile()}
     registry = ProviderRegistry()
     registry.initialize(
-        {"provider_a": ["key-0", "key-1"]}, catalog=catalog, cooldown_tracker=CooldownTracker()
+        {"provider_a": ["key-0", "key-1"]}, catalog=catalog, cooldown_tracker=CooldownManager()
     )
     registry.get_key_pool("provider_a").buckets[0].rpm_tokens = 0.0  # key 0 exhausted
 
@@ -70,7 +70,7 @@ def test_429_on_key_zero_puts_it_in_cooldown_key_one_handles_next_request():
     catalog = {"provider_a": _make_profile()}
     registry = ProviderRegistry()
     registry.initialize(
-        {"provider_a": ["key-0", "key-1"]}, catalog=catalog, cooldown_tracker=CooldownTracker()
+        {"provider_a": ["key-0", "key-1"]}, catalog=catalog, cooldown_tracker=CooldownManager()
     )
     key_pool = registry.get_key_pool("provider_a")
 

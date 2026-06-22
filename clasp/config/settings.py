@@ -372,3 +372,9 @@ def get_settings() -> Settings:
         providers_enabled=settings.enabled_providers(),
     )
     return settings
+
+
+def reload_settings() -> Settings:
+    """Clear the cached config and load it fresh from disk."""
+    get_settings.cache_clear()
+    return get_settings()

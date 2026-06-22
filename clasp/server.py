@@ -37,20 +37,17 @@ from clasp.ratelimit.cooldown import CooldownManager, get_cooldown_manager
 from clasp.router.types import ProviderEnableConfig, SelectorConfig
 
 
-def build_selector_config() -> SelectorConfig:
+def build_selector_config(settings) -> SelectorConfig:
     """
     Build the `SelectorConfig` the routing pipeline will use for the life of
-    this process.
-
-    TODO (plan.md §20 step 42): once `api/service.py` is updated to call the
-    selector, replace this with a real adapter from the pydantic `Settings`
-    object (`clasp.config.settings.get_settings()`) instead of this
-    placeholder, which only knows about the `nvidia_nim` provider so the
-    server can boot standalone today.
+    this process, based on the current settings.
     """
     return SelectorConfig(
-        provider_chain=["nvidia_nim"],
-        providers={"nvidia_nim": ProviderEnableConfig(enabled=True)},
+        provider_chain=settings.provider_chain,
+        providers={
+            name: ProviderEnableConfig(enabled=p.enabled)
+            for name, p in settings.providers.items()
+        },
     )
 
 
@@ -63,7 +60,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     settings = get_settings()
     build_registry(settings)
     
-    config: SelectorConfig = build_selector_config()
+    config: SelectorConfig = build_selector_config(settings)
     registry: ProviderRegistry = get_registry()
     cooldown_mgr: CooldownManager = get_cooldown_manager()
     queue_mgr: QueueManager = get_queue_manager()
