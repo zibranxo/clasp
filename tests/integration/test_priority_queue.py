@@ -18,6 +18,13 @@ Tested scenarios
 
 from __future__ import annotations
 
+from clasp.router import model_map
+import pytest
+
+@pytest.fixture(autouse=True)
+def _patch_resolve_model(monkeypatch):
+    monkeypatch.setattr(model_map, 'resolve_model', lambda *a, **k: 'test-model')
+
 import asyncio
 import time
 from collections.abc import AsyncGenerator
@@ -80,6 +87,7 @@ def _setup_test_env() -> tuple[RecordingProvider, ProviderRegistry, CooldownMana
     pool.buckets[0].rpm_limit = 1000
     pool.buckets[0].tpm_limit = None
     registry._register("provider_a", provider, pool)
+    registry._registration_order.append("provider_a")
     queue_mgr = QueueManager(max_wait_seconds=5.0, drain_poll_interval=0.05)
     config = SelectorConfig(
         provider_chain=["provider_a"],

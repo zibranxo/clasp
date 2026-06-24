@@ -12,6 +12,7 @@ from __future__ import annotations
 import os
 import sys
 import unittest
+from unittest.mock import patch, MagicMock
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
@@ -155,13 +156,14 @@ class TestTransportClassResolution(unittest.TestCase):
 class TestKeyPoolStub(unittest.TestCase):
     """Sprint 1: get_key_pool always returns None."""
 
-    def test_get_key_pool_returns_none_for_registered_provider(self):
+    def test_get_key_pool_returns_key_pool_for_registered_provider(self):
         settings = _settings(
             provider_chain=["nvidia_nim"],
             providers={"nvidia_nim": ProviderConfig(enabled=True, keys=["k"])},
         )
         registry.build_registry(settings)
-        self.assertIsNone(registry.get_key_pool("nvidia_nim"))
+        from clasp.ratelimit.key_pool import KeyPool
+        self.assertIsInstance(registry.get_key_pool("nvidia_nim"), KeyPool)
 
     def test_get_key_pool_returns_none_for_unregistered_provider(self):
         settings = _settings(provider_chain=[], providers={})
@@ -231,20 +233,20 @@ class TestProviderRegistryClassDirectly(unittest.TestCase):
     def test_len_reflects_registered_count(self):
         reg = registry.ProviderRegistry()
         self.assertEqual(len(reg), 0)
-        reg._register("nvidia_nim", NvidiaNimProvider())
+        reg._register("nvidia_nim", NvidiaNimProvider(), MagicMock(keys=["k1"]))
         self.assertEqual(len(reg), 1)
 
     def test_clear_resets_state(self):
         reg = registry.ProviderRegistry()
-        reg._register("nvidia_nim", NvidiaNimProvider())
+        reg._register("nvidia_nim", NvidiaNimProvider(), MagicMock(keys=["k1"]))
         reg._clear()
         self.assertEqual(len(reg), 0)
         self.assertEqual(reg.all_enabled(), [])
 
     def test_register_same_name_twice_doesnt_duplicate_order_entry(self):
         reg = registry.ProviderRegistry()
-        reg._register("nvidia_nim", NvidiaNimProvider())
-        reg._register("nvidia_nim", NvidiaNimProvider())
+        reg._register("nvidia_nim", NvidiaNimProvider(), MagicMock(keys=["k1"]))
+        reg._register("nvidia_nim", NvidiaNimProvider(), MagicMock(keys=["k1"]))
         self.assertEqual(reg.all_enabled().count("nvidia_nim"), 1)
 
 

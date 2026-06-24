@@ -85,6 +85,10 @@ class BaseProvider(ABC):
     async def aclose(self) -> None:
         await self.client.aclose()
 
+    async def list_models(self, api_key: str | None = None) -> list[str]:
+        """List available models from the provider."""
+        return []
+
     @abstractmethod
     def _stream_raw(
         self,

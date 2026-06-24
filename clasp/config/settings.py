@@ -210,6 +210,14 @@ _DEFAULT_PROVIDER_CHAIN: list[str] = [
     "groq",
     "openrouter",
     "ollama",
+    "mistral_codestral",
+    "deepseek",
+    "kimi",
+    "llamacpp",
+    "opencode",
+    "opencode_go",
+    "wafer",
+    "zai",
 ]
 
 _DEFAULT_PROVIDERS: dict[str, ProviderConfig] = {
@@ -223,6 +231,14 @@ _DEFAULT_PROVIDERS: dict[str, ProviderConfig] = {
     "together":    ProviderConfig(enabled=False),
     "ollama":      ProviderConfig(enabled=True, base_url="http://localhost:11434"),
     "lm_studio":   ProviderConfig(enabled=False, base_url="http://localhost:1234"),
+    "mistral_codestral": ProviderConfig(enabled=False),
+    "deepseek":    ProviderConfig(enabled=False),
+    "kimi":        ProviderConfig(enabled=False),
+    "llamacpp":    ProviderConfig(enabled=False, base_url="http://localhost:8080/v1"),
+    "opencode":    ProviderConfig(enabled=False),
+    "opencode_go": ProviderConfig(enabled=False),
+    "wafer":       ProviderConfig(enabled=False),
+    "zai":         ProviderConfig(enabled=False),
 }
 
 
@@ -262,6 +278,25 @@ class Settings(BaseSettings):
     optimizer: OptimizerConfig = Field(default_factory=OptimizerConfig)
     shared_pool: SharedPoolConfig = Field(default_factory=SharedPoolConfig)
 
+    enable_web_server_tools: bool = Field(default=False, validation_alias="ENABLE_WEB_SERVER_TOOLS")
+    web_fetch_allowed_schemes: str = Field(default="http,https", validation_alias="WEB_FETCH_ALLOWED_SCHEMES")
+    web_fetch_allow_private_networks: bool = Field(default=False, validation_alias="WEB_FETCH_ALLOW_PRIVATE_NETWORKS")
+
+    # Agent Optimizations & Headless Bots
+    fast_prefix_detection: bool = Field(default=True, validation_alias="FAST_PREFIX_DETECTION")
+    enable_network_probe_mock: bool = Field(default=True, validation_alias="ENABLE_NETWORK_PROBE_MOCK")
+    enable_title_generation_skip: bool = Field(default=True, validation_alias="ENABLE_TITLE_GENERATION_SKIP")
+    enable_suggestion_mode_skip: bool = Field(default=True, validation_alias="ENABLE_SUGGESTION_MODE_SKIP")
+    enable_filepath_extraction_mock: bool = Field(default=True, validation_alias="ENABLE_FILEPATH_EXTRACTION_MOCK")
+
+    # Messaging logs and diagnostics
+    log_raw_messaging_content: bool = Field(default=False, validation_alias="LOG_RAW_MESSAGING_CONTENT")
+    log_raw_cli_diagnostics: bool = Field(default=False, validation_alias="LOG_RAW_CLI_DIAGNOSTICS")
+    log_messaging_error_details: bool = Field(default=False, validation_alias="LOG_MESSAGING_ERROR_DETAILS")
+    debug_platform_edits: bool = Field(default=False, validation_alias="DEBUG_PLATFORM_EDITS")
+    debug_subagent_stack: bool = Field(default=False, validation_alias="DEBUG_SUBAGENT_STACK")
+
+
     # ── Env-var overrides for server sub-fields ────────────────────────────
 
     @model_validator(mode="after")
@@ -299,6 +334,13 @@ class Settings(BaseSettings):
             "openrouter":  "OPENROUTER_API_KEY",
             "mistral":     "MISTRAL_API_KEY",
             "together":    "TOGETHER_API_KEY",
+            "mistral_codestral": "CODESTRAL_API_KEY",
+            "deepseek":    "DEEPSEEK_API_KEY",
+            "kimi":        "KIMI_API_KEY",
+            "opencode":    "OPENCODE_API_KEY",
+            "opencode_go": "OPENCODE_API_KEY",
+            "wafer":       "WAFER_API_KEY",
+            "zai":         "ZAI_API_KEY",
         }
 
         for provider_name, env_var in _KEY_ENV_VARS.items():
@@ -330,6 +372,9 @@ class Settings(BaseSettings):
             for name in self.provider_chain
             if self.providers.get(name, ProviderConfig()).enabled
         ]
+
+    def web_fetch_allowed_scheme_set(self) -> frozenset[str]:
+        return frozenset(s.strip().lower() for s in self.web_fetch_allowed_schemes.split(",") if s.strip())
 
     @classmethod
     def settings_customise_sources(

@@ -103,15 +103,29 @@ async def select(
     exclude = exclude or set()
 
     # ── Build candidate order: by_type override goes first ─────────────────
-    override_slug = config.by_type.get(request.type.value.lower(), "") or ""
-    override_name = override_slug.split("/")[0] if override_slug else ""
+    requested_model = (request.body.get("model") or "") if isinstance(request.body, dict) else (getattr(request, "model", "") or "")
+    target_provider = None
+    if requested_model:
+        from clasp.router.model_map import decode_gateway_model_id
+        decoded = decode_gateway_model_id(requested_model)
+        if decoded:
+            target_provider, _, _ = decoded
 
-    if override_name and override_name not in exclude:
-        candidates = [override_name] + [
-            p for p in config.provider_chain if p != override_name
-        ]
+    if target_provider:
+        if target_provider in exclude:
+            candidates = []
+        else:
+            candidates = [target_provider]
     else:
-        candidates = list(config.provider_chain)
+        override_slug = config.by_type.get(request.type.value.lower(), "") or ""
+        override_name = override_slug.split("/")[0] if override_slug else ""
+
+        if override_name and override_name not in exclude:
+            candidates = [override_name] + [
+                p for p in config.provider_chain if p != override_name
+            ]
+        else:
+            candidates = list(config.provider_chain)
 
     for provider_name in candidates:
         if provider_name in exclude:

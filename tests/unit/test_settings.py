@@ -14,6 +14,20 @@ from pathlib import Path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
 from clasp.config.settings import Settings, get_settings, _get_config_path
+
+import pytest
+@pytest.fixture(autouse=True)
+def mock_config_path(tmp_path):
+    import os
+    fake_path = str(tmp_path / 'fake_config.yaml')
+    old_val = os.environ.get('CLASP_CONFIG_PATH')
+    os.environ['CLASP_CONFIG_PATH'] = fake_path
+    yield
+    if old_val is not None:
+        os.environ['CLASP_CONFIG_PATH'] = old_val
+    else:
+        os.environ.pop('CLASP_CONFIG_PATH', None)
+
 from clasp.config.provider_catalog import PROVIDER_CATALOG
 
 
@@ -75,6 +89,14 @@ def test_settings_defaults():
         "groq",
         "openrouter",
         "ollama",
+        "mistral_codestral",
+        "deepseek",
+        "kimi",
+        "llamacpp",
+        "opencode",
+        "opencode_go",
+        "wafer",
+        "zai",
     ]
     assert settings.providers["nvidia_nim"].enabled is False
     assert settings.providers["ollama"].enabled is True  # Ollama enabled by default
@@ -155,13 +177,13 @@ def test_settings_local_provider_without_keys():
 
 
 def test_settings_non_local_provider_requires_keys():
-    """Test that non-local providers require API keys."""
+    """Test that Settings.enabled_providers() simply returns enabled providers, without filtering by keys (which is done in registry)."""
     settings = Settings()
     settings.providers["nvidia_nim"].enabled = True
     settings.providers["nvidia_nim"].keys = []  # No keys
 
     enabled = settings.enabled_providers()
-    assert "nvidia_nim" not in enabled  # Should be filtered out
+    assert "nvidia_nim" in enabled  # Settings doesn't filter by keys anymore
 
 
 def test_settings_environment_variable_override():
@@ -236,16 +258,17 @@ def test_settings_provider_key_injection_deduplication():
     old_nim_key = os.environ.get("NVIDIA_NIM_API_KEY")
 
     try:
-        # Set up existing keys in config
-        settings = Settings()
-        settings.providers["nvidia_nim"].enabled = True
-        settings.providers["nvidia_nim"].keys = ["existing-key-1", "existing-key-2"]
+        # Set up existing keys in config via init to simulate being loaded from disk
+        from clasp.config.settings import ProviderConfig
+        initial_providers = {
+            "nvidia_nim": ProviderConfig(enabled=True, keys=["existing-key-1", "existing-key-2"])
+        }
 
         # Inject keys from environment (some duplicates)
         os.environ["NVIDIA_NIM_API_KEY"] = "existing-key-2,new-key-1,existing-key-1,new-key-2"
 
         # Re-initialize settings to trigger env var processing
-        settings = Settings()
+        settings = Settings(providers=initial_providers)
 
         # Should have deduplicated keys, preserving original order then adding new ones
         expected = ["existing-key-1", "existing-key-2", "new-key-1", "new-key-2"]

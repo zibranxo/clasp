@@ -220,5 +220,42 @@ class TestPydanticStyleRoutingCompat(unittest.TestCase):
         self.assertEqual(_as_dict(fake), {"x": "y"})
 
 
+class TestPrefixModelDecoder(unittest.TestCase):
+    def test_decode_gateway_model_id_anthropic(self):
+        from clasp.router.model_map import decode_gateway_model_id
+        decoded = decode_gateway_model_id("anthropic/nvidia_nim/meta/llama-3.1-70b-instruct")
+        self.assertEqual(decoded, ("nvidia_nim", "meta/llama-3.1-70b-instruct", True))
+
+    def test_decode_gateway_model_id_no_thinking(self):
+        from clasp.router.model_map import decode_gateway_model_id
+        decoded = decode_gateway_model_id("claude-3-freecc-no-thinking/nvidia_nim/meta/llama-3.1-70b-instruct")
+        self.assertEqual(decoded, ("nvidia_nim", "meta/llama-3.1-70b-instruct", False))
+
+    def test_decode_gateway_model_id_case_insensitivity(self):
+        from clasp.router.model_map import decode_gateway_model_id
+        decoded1 = decode_gateway_model_id("Anthropic/nvidia_nim/meta/llama-3.1-70b-instruct")
+        self.assertEqual(decoded1, ("nvidia_nim", "meta/llama-3.1-70b-instruct", True))
+        decoded2 = decode_gateway_model_id("CLAUDE-3-FREECC-NO-THINKING/nvidia_nim/meta/llama-3.1-70b-instruct")
+        self.assertEqual(decoded2, ("nvidia_nim", "meta/llama-3.1-70b-instruct", False))
+        decoded3 = decode_gateway_model_id("aNtHrOpIc/nvidia_nim/meta/llama-3.1-70b-instruct")
+        self.assertEqual(decoded3, ("nvidia_nim", "meta/llama-3.1-70b-instruct", True))
+
+    def test_decode_gateway_model_id_invalid(self):
+        from clasp.router.model_map import decode_gateway_model_id
+        self.assertIsNone(decode_gateway_model_id("invalid/nvidia_nim/meta/llama-3.1-70b-instruct"))
+        self.assertIsNone(decode_gateway_model_id("claude-sonnet-4-5"))
+        self.assertIsNone(decode_gateway_model_id("anthropic/nvidia_nim"))
+
+    def test_resolve_model_with_prefixed_model(self):
+        settings = _settings()
+        request = _req(model="anthropic/nvidia_nim/meta/llama-3.1-70b-instruct")
+        self.assertEqual(
+            resolve_model(request, "nvidia_nim", settings),
+            "meta/llama-3.1-70b-instruct"
+        )
+        # Should return None for non-matching provider
+        self.assertIsNone(resolve_model(request, "gemini", settings))
+
+
 if __name__ == "__main__":
     unittest.main()

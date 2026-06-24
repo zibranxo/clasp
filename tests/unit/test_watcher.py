@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import os
 import sys
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
@@ -61,7 +62,7 @@ def test_config_watcher_manual_trigger():
     watcher = ConfigWatcher()
 
     # Mock the _do_reload method
-    mock_settings = MagicMock(spec=Settings)
+    mock_settings = MagicMock()
     watcher._do_reload = AsyncMock(return_value=mock_settings)
 
     # Trigger reload
@@ -76,7 +77,7 @@ def test_config_watcher_do_reload_success():
     watcher = ConfigWatcher()
 
     # Mock get_settings to return test settings
-    mock_settings = MagicMock(spec=Settings)
+    mock_settings = MagicMock()
     mock_settings.enabled_providers.return_value = ["provider1", "provider2"]
     mock_settings.server.port = 9999
 
@@ -99,7 +100,7 @@ def test_config_watcher_do_reload_failure():
     # Mock get_settings to raise an exception
     with patch("clasp.config.watcher.get_settings", side_effect=Exception("Load failed")):
         # Mock the fallback call to get_settings
-        mock_settings = MagicMock(spec=Settings)
+        mock_settings = MagicMock()
         with patch("clasp.config.watcher.get_settings", return_value=mock_settings):
             result = asyncio.run(watcher._do_reload())
             # Should return the fallback settings
@@ -112,7 +113,7 @@ def test_config_watcher_do_reload_with_sse_queue():
     sse_queue = asyncio.Queue()
     watcher._sse_queue = sse_queue
 
-    mock_settings = MagicMock(spec=Settings)
+    mock_settings = MagicMock()
     mock_settings.enabled_providers.return_value = ["test-provider"]
     mock_settings.server.port = 8888
 
@@ -140,7 +141,7 @@ def test_config_watcher_do_reload_sse_queue_full():
     # Fill the queue
     sse_queue.put_nowait({"existing": "message"})
 
-    mock_settings = MagicMock(spec=Settings)
+    mock_settings = MagicMock()
     mock_settings.enabled_providers.return_value = []
     mock_settings.server.port = 8082
 
@@ -166,7 +167,7 @@ def test_config_watcher_do_reload_with_callbacks():
     watcher.add_callback(callback1)
     watcher.add_callback(callback2)
 
-    mock_settings = MagicMock(spec=Settings)
+    mock_settings = MagicMock()
 
     with patch("clasp.config.watcher.get_settings", return_value=mock_settings):
         from clasp.config.settings import get_settings
@@ -189,7 +190,7 @@ def test_config_watcher_do_reload_callback_exception():
     watcher.add_callback(callback1)
     watcher.add_callback(callback2)
 
-    mock_settings = MagicMock(spec=Settings)
+    mock_settings = MagicMock()
 
     with patch("clasp.config.watcher.get_settings", return_value=mock_settings):
         from clasp.config.settings import get_settings
@@ -207,8 +208,14 @@ def test_config_watcher_run_task_not_implemented_yet():
     """Test that run method handles missing watchfiles gracefully."""
     watcher = ConfigWatcher()
 
-    # Mock awatch to raise ImportError
-    with patch("clasp.config.watcher.awatch", side_effect=ImportError()):
+    # Mock import to raise ImportError for watchfiles
+    orig_import = __import__
+    def mock_import(name, *args, **kwargs):
+        if name == "watchfiles":
+            raise ImportError()
+        return orig_import(name, *args, **kwargs)
+
+    with patch("builtins.__import__", side_effect=mock_import):
         # The run method should catch this and wait forever
         # We'll test it with a timeout
         async def test_run_timeout():

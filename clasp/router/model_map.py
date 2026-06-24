@@ -117,6 +117,16 @@ def resolve_model(
 
     See module docstring for the full three-step matching order.
     """
+    requested_model = (request.body.get("model") or "") if isinstance(request.body, dict) else (getattr(request, "model", "") or "")
+    if requested_model:
+        decoded = decode_gateway_model_id(requested_model)
+        if decoded:
+            decoded_provider, decoded_slug, _ = decoded
+            if decoded_provider == provider_name:
+                logger.debug("model_map: resolved via prefix decoding", provider=provider_name, slug=decoded_slug)
+                return decoded_slug
+            return None
+
     routing_models: dict[str, str] = _as_dict(getattr(settings.routing, "models", None))
     by_type: dict[str, str] = _as_dict(getattr(settings.routing, "by_type", None))
 
@@ -158,6 +168,30 @@ def resolve_model(
     logger.debug("model_map: no mapping for provider", provider=provider_name,
                 requested_model=request.body.get("model"))
     return None
+
+
+def decode_gateway_model_id(model_name: str) -> tuple[str, str, bool] | None:
+    """
+    Decodes f"anthropic/{provider}/{model}" or f"claude-3-freecc-no-thinking/{provider}/{model}".
+    Returns (provider_name, model_slug, thinking_enabled) or None.
+    """
+    prefix, sep, remainder = model_name.partition("/")
+    if not sep:
+        return None
+
+    prefix_lower = prefix.lower()
+    if prefix_lower == "anthropic":
+        thinking = True
+    elif prefix_lower == "claude-3-freecc-no-thinking":
+        thinking = False
+    else:
+        return None
+
+    provider, sep2, model_slug = remainder.partition("/")
+    if not sep2 or not model_slug:
+        return None
+
+    return provider, model_slug, thinking
 
 
 #: Alias matching the function name used in plan.md §13's selector.py

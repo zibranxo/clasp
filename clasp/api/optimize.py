@@ -50,7 +50,6 @@ References: plan.md §8 [2], §14, §17 (API contracts for /v1/models and
 from __future__ import annotations
 
 import json
-import time
 import uuid
 from dataclasses import dataclass
 from typing import Any, Literal
@@ -315,8 +314,8 @@ def handle_probe(
     """
     # ── /v1/models ───────────────────────────────────────────────────────────
     if path == "/v1/models":
-        logger.debug("optimize: serving static model list")
-        return ProbeResult(kind="json", payload=STATIC_MODEL_LIST)
+        logger.debug("optimize: serving model list")
+        return ProbeResult(kind="json", payload=answer_models())
 
     # ── /v1/messages/count_tokens ────────────────────────────────────────────
     if path == "/v1/messages/count_tokens":
@@ -377,8 +376,32 @@ def answer_count_tokens(body: dict[str, Any]) -> dict:
     return handle_probe("/v1/messages/count_tokens", body).payload
 
 def answer_models() -> dict:
-    """Answer models request locally."""
-    return handle_probe("/v1/models", {}).payload
+    """Answer models request locally with static and dynamic prefixed variants."""
+    data = list(STATIC_MODEL_LIST["data"])
+    try:
+        from clasp.providers.registry import get_model_lists
+        model_lists = get_model_lists()
+        for provider_name, models in model_lists.items():
+            if provider_name == "anthropic":
+                continue
+            for model_id in models:
+                data.append({
+                    "id": f"anthropic/{provider_name}/{model_id}",
+                    "object": "model",
+                    "owned_by": "clasp"
+                })
+                data.append({
+                    "id": f"claude-3-freecc-no-thinking/{provider_name}/{model_id}",
+                    "object": "model",
+                    "owned_by": "clasp"
+                })
+    except Exception as e:
+        logger.warning(f"Failed to fetch dynamic model list from registry: {e}")
+
+    return {
+        "object": "list",
+        "data": data,
+    }
 
 def is_local_probe(body: dict[str, Any]) -> bool:
     """Check if body represents a local probe (for /v1/messages endpoint)."""

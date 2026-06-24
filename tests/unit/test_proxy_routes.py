@@ -9,7 +9,8 @@ from __future__ import annotations
 import os
 import sys
 import uuid
-from unittest.mock import AsyncMock, MagicMock
+import asyncio
+from unittest.mock import AsyncMock, MagicMock, patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
@@ -93,18 +94,18 @@ def test_local_probe_response_structure():
         return events
 
     events = asyncio.run(collect_events())
-    assert len(events) == 5  # message_start, content_block_start, content_block_delta, content_block_stop, message_delta, message_stop? Wait that's 6
+    assert len(events) == 6  # message_start, content_block_start, content_block_delta, content_block_stop, message_delta, message_stop? Wait that's 6
     # Actually let's check what _canned_sse_response produces
     # It produces 6 events: message_start, content_block_start, content_block_delta, content_block_stop, message_delta, message_stop
     assert len(events) == 6
 
     # Check first event is message_start
     assert events[0].startswith("event: message_start\ndata:")
-    assert '"type":"message_start"' in events[0]
+    assert '"type": "message_start"' in events[0]
 
     # Check last event is message_stop
     assert events[-1].startswith("event: message_stop\ndata:")
-    assert '"type":"message_stop"' in events[-1]
+    assert '"type": "message_stop"' in events[-1]
 
 
 def test_verify_bearer_valid():
@@ -112,12 +113,11 @@ def test_verify_bearer_valid():
     mock_request = MagicMock(spec=Request)
     mock_request.headers = {"Authorization": "Bearer valid-token"}
 
-    mock_settings = MagicMock(spec=Settings)
+    mock_settings = MagicMock()
     mock_settings.server.api_key = "valid-token"
 
-    with patch("clasp.api.proxy_routes.get_settings", return_value=mock_settings):
-        # Should not raise
-        _verify_bearer(mock_request)
+    # Should not raise
+    _verify_bearer(mock_request, settings=mock_settings)
 
 
 def test_verify_bearer_missing_header():
@@ -125,16 +125,15 @@ def test_verify_bearer_missing_header():
     mock_request = MagicMock(spec=Request)
     mock_request.headers = {}  # No Authorization header
 
-    mock_settings = MagicMock(spec=Settings)
+    mock_settings = MagicMock()
     mock_settings.server.api_key = "any-token"
 
-    with patch("clasp.api.proxy_routes.get_settings", return_value=mock_settings):
-        try:
-            _verify_bearer(mock_request)
-            assert False, "Should have raised HTTPException"
-        except HTTPException as e:
-            assert e.status_code == 401
-            assert "Missing Authorization header" in e.detail["error"]["message"]
+    try:
+        _verify_bearer(mock_request, settings=mock_settings)
+        assert False, "Should have raised HTTPException"
+    except HTTPException as e:
+        assert e.status_code == 401
+        assert "Missing Authorization header" in e.detail["error"]["message"]
 
 
 def test_verify_bearer_wrong_prefix():
@@ -142,16 +141,15 @@ def test_verify_bearer_wrong_prefix():
     mock_request = MagicMock(spec=Request)
     mock_request.headers = {"Authorization": "Basic invalid-token"}
 
-    mock_settings = MagicMock(spec=Settings)
+    mock_settings = MagicMock()
     mock_settings.server.api_key = "any-token"
 
-    with patch("clasp.api.proxy_routes.get_settings", return_value=mock_settings):
-        try:
-            _verify_bearer(mock_request)
-            assert False, "Should have raised HTTPException"
-        except HTTPException as e:
-            assert e.status_code == 401
-            assert "Missing Authorization header" in e.detail["error"]["message"]
+    try:
+        _verify_bearer(mock_request, settings=mock_settings)
+        assert False, "Should have raised HTTPException"
+    except HTTPException as e:
+        assert e.status_code == 401
+        assert "Missing Authorization header" in e.detail["error"]["message"]
 
 
 def test_verify_bearer_wrong_token():
@@ -159,16 +157,15 @@ def test_verify_bearer_wrong_token():
     mock_request = MagicMock(spec=Request)
     mock_request.headers = {"Authorization": "Bearer wrong-token"}
 
-    mock_settings = MagicMock(spec=Settings)
+    mock_settings = MagicMock()
     mock_settings.server.api_key = "correct-token"
 
-    with patch("clasp.api.proxy_routes.get_settings", return_value=mock_settings):
-        try:
-            _verify_bearer(mock_request)
-            assert False, "Should have raised HTTPException"
-        except HTTPException as e:
-            assert e.status_code == 401
-            assert "Invalid API key" in e.detail["error"]["message"]
+    try:
+        _verify_bearer(mock_request, settings=mock_settings)
+        assert False, "Should have raised HTTPException"
+    except HTTPException as e:
+        assert e.status_code == 401
+        assert "Invalid API key" in e.detail["error"]["message"]
 
 
 def test_verify_bearer_case_insensitive_prefix():
@@ -176,17 +173,15 @@ def test_verify_bearer_case_insensitive_prefix():
     mock_request = MagicMock(spec=Request)
     mock_request.headers = {"Authorization": "bearer correct-token"}  # lowercase
 
-    mock_settings = MagicMock(spec=Settings)
+    mock_settings = MagicMock()
     mock_settings.server.api_key = "correct-token"
 
-    with patch("clasp.api.proxy_routes.get_settings", return_value=mock_settings):
-        # Should not raise (case insensitive)
-        _verify_bearer(mock_request)
+    # Should not raise (case insensitive)
+    _verify_bearer(mock_request, settings=mock_settings)
 
     # Test mixed case
     mock_request.headers = {"Authorization": "BeArEr correct-token"}
-    with patch("clasp.api.proxy_routes.get_settings", return_value=mock_settings):
-        _verify_bearer(mock_request)
+    _verify_bearer(mock_request, settings=mock_settings)
 
 
 def test_verify_bearer_extra_spaces():
@@ -194,12 +189,11 @@ def test_verify_bearer_extra_spaces():
     mock_request = MagicMock(spec=Request)
     mock_request.headers = {"Authorization": "Bearer  correct-token  "}  # Extra spaces
 
-    mock_settings = MagicMock(spec=Settings)
+    mock_settings = MagicMock()
     mock_settings.server.api_key = "correct-token"
 
-    with patch("clasp.api.proxy_routes.get_settings", return_value=mock_settings):
-        # Should not raise
-        _verify_bearer(mock_request)
+    # Should not raise
+    _verify_bearer(mock_request, settings=mock_settings)
 
 
 def test_raise_401():

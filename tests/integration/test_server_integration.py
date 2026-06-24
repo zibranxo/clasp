@@ -17,9 +17,6 @@ import clasp.server as server
 
 @pytest.mark.asyncio
 async def test_create_app_exposes_health_and_ui_redirect(monkeypatch: pytest.MonkeyPatch) -> None:
-    # We just need to mock things that cause side effects
-    monkeypatch.setattr(server, "_start_config_watcher", lambda *args, **kwargs: None, raising=False)
-
     app = server.create_app(debug=True)
     transport = httpx.ASGITransport(app=app)
 
@@ -35,9 +32,6 @@ async def test_create_app_exposes_health_and_ui_redirect(monkeypatch: pytest.Mon
 
 @pytest.mark.asyncio
 async def test_ip_guard_is_active_on_internal_paths(monkeypatch: pytest.MonkeyPatch) -> None:
-    # We just need to mock things that cause side effects
-    monkeypatch.setattr(server, "_start_config_watcher", lambda *args, **kwargs: None, raising=False)
-
     app = server.create_app(debug=True)
     transport = httpx.ASGITransport(app=app, client=("203.0.113.10", 4000))
 

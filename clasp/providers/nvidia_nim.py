@@ -41,6 +41,7 @@ DEFAULT_KIMI_THINKING_BUDGET_TOKENS = 8000
 class NvidiaNimProvider(OpenAIChatTransport):
     def __init__(
         self,
+        name: str = "nvidia_nim",
         *,
         base_url: str = NVIDIA_NIM_BASE_URL,
         timeout_seconds: float = 60.0,
@@ -74,7 +75,7 @@ class NvidiaNimProvider(OpenAIChatTransport):
         self.kimi_thinking_budget_tokens = kimi_thinking_budget_tokens
 
         super().__init__(
-            "nvidia_nim",
+            name,
             base_url,
             timeout_seconds=timeout_seconds,
             merge_system_resolver=self._merge_system_for_model,

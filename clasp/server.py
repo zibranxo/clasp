@@ -60,8 +60,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     settings = get_settings()
     build_registry(settings)
     
-    config: SelectorConfig = build_selector_config(settings)
     registry: ProviderRegistry = get_registry()
+    refresh_task = asyncio.create_task(registry.refresh_model_lists(settings))
+    logger.info("background model list refresh task started")
+    
+    config: SelectorConfig = build_selector_config(settings)
     cooldown_mgr: CooldownManager = get_cooldown_manager()
     queue_mgr: QueueManager = get_queue_manager()
 

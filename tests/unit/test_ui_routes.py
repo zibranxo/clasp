@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import os
 import sys
+import tempfile
+import asyncio
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -56,7 +58,7 @@ def test_serve_index_success():
                 response = await serve_index()
                 assert response.status_code == 200
                 assert response.media_type == "text/html"
-                body = b"".join([chunk async for chunk in response.body_iterator])
+                body = Path(response.path).read_bytes()
                 assert b"<html><body>Test</body></html>" in body
 
             asyncio.run(test_serve())
@@ -101,7 +103,7 @@ def test_serve_app_js():
                 response = await serve_app_js()
                 assert response.status_code == 200
                 assert response.media_type == "application/javascript"
-                body = b"".join([chunk async for chunk in response.body_iterator])
+                body = Path(response.path).read_bytes()
                 assert b"console.log('test');" in body
 
             asyncio.run(test_serve())
@@ -125,7 +127,7 @@ def test_serve_style_css():
                 response = await serve_style_css()
                 assert response.status_code == 200
                 assert response.media_type == "text/css"
-                body = b"".join([chunk async for chunk in response.body_iterator])
+                body = Path(response.path).read_bytes()
                 assert b"body { color: red; }" in body
 
             asyncio.run(test_serve())
@@ -142,7 +144,7 @@ def test_mount_static():
 
     with tempfile.TemporaryDirectory() as tmpdir:
         static_dir = Path(tmpdir)
-        static_dir.mkdir()  # Make it exist
+        static_dir.mkdir(exist_ok=True)  # Make it exist
 
         import clasp.ui.routes as ui_routes
         original_static_dir = ui_routes.STATIC_DIR
@@ -154,8 +156,9 @@ def test_mount_static():
             mock_app.mount.assert_called_once()
             args, kwargs = mock_app.mount.call_args
             assert args[0] == "/ui/assets"
-            assert isinstance(args[1], MagicMock)  # StaticFiles instance
-            assert kwargs["name"] == "ui-assets"
+            from fastapi.staticfiles import StaticFiles
+            assert isinstance(args[1], StaticFiles)  # StaticFiles instance
+            assert kwargs["name"] == "ui_assets"
         finally:
             ui_routes.STATIC_DIR = original_static_dir
 

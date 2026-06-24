@@ -91,6 +91,7 @@ from clasp.providers.base import BaseProvider
 from clasp.providers.openai_transport import OpenAIChatTransport
 from clasp.providers.anthropic_transport import AnthropicMessagesTransport
 from clasp.providers.nvidia_nim import NvidiaNimProvider
+from clasp.providers.deepseek import DeepSeekProvider
 from clasp.ratelimit.key_pool import KeyPool
 
 if TYPE_CHECKING:
@@ -111,11 +112,20 @@ PROVIDER_CLASS_MAP: dict[str, type[BaseProvider]] = {
     "cerebras": OpenAIChatTransport,
     "groq": OpenAIChatTransport,
     "fireworks": AnthropicMessagesTransport,
-    "openrouter": OpenAIChatTransport,
+    "openrouter": AnthropicMessagesTransport,
     "mistral": OpenAIChatTransport,
     "together": OpenAIChatTransport,
-    "ollama": OpenAIChatTransport,
-    "lm_studio": OpenAIChatTransport,
+    "ollama": AnthropicMessagesTransport,
+    "lm_studio": AnthropicMessagesTransport,
+    # Milestone 2 Providers
+    "mistral_codestral": OpenAIChatTransport,
+    "deepseek": DeepSeekProvider,
+    "kimi": AnthropicMessagesTransport,
+    "llamacpp": AnthropicMessagesTransport,
+    "opencode": OpenAIChatTransport,
+    "opencode_go": OpenAIChatTransport,
+    "wafer": AnthropicMessagesTransport,
+    "zai": AnthropicMessagesTransport,
 }
 
 # ---------------------------------------------------------------------------
@@ -202,6 +212,7 @@ class ProviderRegistry:
         self._providers: dict[str, BaseProvider] = {}
         self._key_pools: dict[str, KeyPool] = {}
         self._registration_order: list[str] = []
+        self._model_lists: dict[str, list[str]] = {}
 
     # ------------------------------------------------------------------
     # Write interface (used only by build_registry / rebuild)
@@ -219,6 +230,7 @@ class ProviderRegistry:
         self._providers.clear()
         self._key_pools.clear()
         self._registration_order.clear()
+        self._model_lists.clear()
 
     # ------------------------------------------------------------------
     # Read interface
@@ -235,6 +247,50 @@ class ProviderRegistry:
     def all_enabled(self) -> list[str]:
         """Names of all registered providers, in the order they were registered."""
         return list(self._registration_order)
+
+    def get_model_lists(self) -> dict[str, list[str]]:
+        """Return the dictionary of cached model lists by provider name."""
+        return self._model_lists
+
+    async def refresh_model_lists(self, settings: Settings) -> None:
+        """
+        Retrieves models concurrently for enabled providers without blocking server startup.
+        Saves the results in self._model_lists.
+        """
+        import asyncio
+        enabled_providers = self.all_enabled()
+        tasks = {}
+        for provider_name in enabled_providers:
+            provider = self.get(provider_name)
+            if not provider:
+                continue
+            pcfg = settings.providers.get(provider_name)
+            api_key = pcfg.keys[0] if pcfg and pcfg.keys else None
+            tasks[provider_name] = asyncio.create_task(provider.list_models(api_key))
+
+        if not tasks:
+            try:
+                from clasp.api.optimize import answer_models
+                from clasp.core.openai_responses.codex_catalog import update_codex_model_catalog
+                update_codex_model_catalog(answer_models())
+            except Exception as e:
+                logger.warning(f"Failed to update Codex model catalog: {e}")
+            return
+
+        results = await asyncio.gather(*tasks.values(), return_exceptions=True)
+        for name, result in zip(tasks.keys(), results):
+            if isinstance(result, Exception):
+                logger.warning(f"Failed to fetch models for {name}: {result}")
+                continue
+            self._model_lists[name] = result
+
+        try:
+            from clasp.api.optimize import answer_models
+            from clasp.core.openai_responses.codex_catalog import update_codex_model_catalog
+            update_codex_model_catalog(answer_models())
+            logger.info("Codex model catalog updated successfully")
+        except Exception as e:
+            logger.warning(f"Failed to update Codex model catalog: {e}")
 
     def __len__(self) -> int:
         return len(self._providers)
@@ -384,6 +440,11 @@ def get_key_pool(name: str) -> KeyPool | None:
 def all_enabled() -> list[str]:
     """Names of all registered (enabled) providers in registration order."""
     return _registry.all_enabled()
+
+
+def get_model_lists() -> dict[str, list[str]]:
+    """Return the cached model lists from the global registry."""
+    return _registry.get_model_lists()
 
 
 def rebuild(settings: "Settings") -> ProviderRegistry:

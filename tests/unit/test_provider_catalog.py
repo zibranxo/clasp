@@ -92,6 +92,14 @@ def test_provider_catalog_has_required_providers():
         "fireworks",
         "ollama",
         "lm_studio",
+        "mistral_codestral",
+        "deepseek",
+        "kimi",
+        "llamacpp",
+        "opencode",
+        "opencode_go",
+        "wafer",
+        "zai",
     }
 
     assert set(PROVIDER_CATALOG.keys()) == expected_providers
@@ -136,7 +144,7 @@ def test_gemini_profile():
     assert profile.supports_thinking is True
     assert profile.max_context_tokens == 1_000_000
     assert profile.tier == "free"
-    assert profile.free_tier_note == "15 RPM free • 1M tokens/day • aistudio.google.com"
+    assert profile.free_tier_note == "15 RPM free • 1 M tokens/day • aistudio.google.com"
 
 
 def test_ollama_profile():
@@ -145,7 +153,7 @@ def test_ollama_profile():
 
     assert profile.display_name == "Ollama (local)"
     assert profile.base_url == "http://localhost:11434"
-    assert profile.transport == "openai_chat"
+    assert profile.transport == "anthropic_messages"
     assert profile.rpm_limit == 9_999  # Artificially high
     assert profile.tpm_limit is None
     assert profile.daily_token_limit is None

@@ -51,6 +51,15 @@ class AnthropicRequest:
     needs_tools: bool = False
     needs_vision: bool = False
 
+    @property
+    def model(self) -> str:
+        """Return the model ID from the request body."""
+        return self.body.get("model", "")
+
+    def model_dump(self, *args, **kwargs) -> dict[str, Any]:
+        """Return the request body dictionary (duck-typing Pydantic model)."""
+        return self.body
+
     @classmethod
     def from_body(cls, body: dict[str, Any]) -> "AnthropicRequest":
         """Classify *body* via clasp.api.detect and wrap it."""

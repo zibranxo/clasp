@@ -21,9 +21,8 @@ import clasp.api.proxy_routes as proxy_routes
 @pytest.fixture
 def app(monkeypatch: pytest.MonkeyPatch) -> FastAPI:
     settings = SimpleNamespace(server=SimpleNamespace(api_key="freecc"))
-    monkeypatch.setattr(proxy_routes, "get_settings", lambda: settings)
-
     app = FastAPI()
+    app.dependency_overrides[proxy_routes.get_settings] = lambda: settings
     app.include_router(proxy_routes.router)
     return app
 
@@ -82,8 +81,8 @@ async def test_messages_non_probe_delegates_to_service_non_stream(
         calls.append({"body": body, "request_id": request_id, "stream": stream})
         return {"type": "message", "role": "assistant", "content": [{"type": "text", "text": "ok"}]}
 
-    monkeypatch.setattr(proxy_routes, "is_local_probe", lambda _body: False)
-    monkeypatch.setattr(proxy_routes, "handle_request", _fake_handle_request)
+    app.dependency_overrides[proxy_routes.get_is_local_probe_fn] = lambda: (lambda _body: False)
+    app.dependency_overrides[proxy_routes.get_handle_request_fn] = lambda: _fake_handle_request
 
     transport = httpx.ASGITransport(app=app)
     headers = {
@@ -120,8 +119,8 @@ async def test_messages_non_probe_delegates_to_service_stream(
         assert stream is True
         return _fake_stream()
 
-    monkeypatch.setattr(proxy_routes, "is_local_probe", lambda _body: False)
-    monkeypatch.setattr(proxy_routes, "handle_request", _fake_handle_request)
+    app.dependency_overrides[proxy_routes.get_is_local_probe_fn] = lambda: (lambda _body: False)
+    app.dependency_overrides[proxy_routes.get_handle_request_fn] = lambda: _fake_handle_request
 
     transport = httpx.ASGITransport(app=app)
     headers = {"Authorization": "Bearer freecc"}

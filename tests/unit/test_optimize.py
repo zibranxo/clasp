@@ -351,5 +351,33 @@ class TestProbeResultDataclass(unittest.TestCase):
         self.assertEqual(ProbeResult.not_a_probe(), ProbeResult.not_a_probe())
 
 
+class TestAnswerModelsDynamic(unittest.TestCase):
+    def test_answer_models_exposes_dynamic_non_anthropic_models(self):
+        from unittest.mock import patch
+        from clasp.api.optimize import answer_models
+
+        mock_lists = {
+            "gemini": ["gemini-model-1", "gemini-model-2"],
+            "anthropic": ["claude-3-opus-20240229"],
+            "ollama": ["llama3"],
+        }
+        with patch("clasp.providers.registry.get_model_lists", return_value=mock_lists):
+            res = answer_models()
+            model_ids = [m["id"] for m in res["data"]]
+            
+            # Should have the static models
+            self.assertIn("claude-sonnet-4-5", model_ids)
+            
+            # Should have the dynamic models in both formats
+            self.assertIn("anthropic/gemini/gemini-model-1", model_ids)
+            self.assertIn("claude-3-freecc-no-thinking/gemini/gemini-model-1", model_ids)
+            self.assertIn("anthropic/ollama/llama3", model_ids)
+            self.assertIn("claude-3-freecc-no-thinking/ollama/llama3", model_ids)
+            
+            # Should NOT have the anthropic provider models
+            self.assertNotIn("anthropic/anthropic/claude-3-opus-20240229", model_ids)
+            self.assertNotIn("claude-3-freecc-no-thinking/anthropic/claude-3-opus-20240229", model_ids)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

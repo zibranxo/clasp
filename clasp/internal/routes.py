@@ -47,7 +47,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 import httpx
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Request, Depends
 from fastapi.responses import PlainTextResponse, StreamingResponse
 from loguru import logger
 
@@ -87,6 +87,12 @@ def _mask_settings(cfg: dict[str, Any]) -> dict[str, Any]:
             pcfg["keys"] = [_mask_key(k) if isinstance(k, str) else k for k in pcfg["keys"]]
     return masked
 
+
+def get_settings_validator():
+    return Settings
+
+def get_write_config_fn():
+    return write_config
 
 def _restore_redacted(new_cfg: dict[str, Any], original: Settings) -> dict[str, Any]:
     """
@@ -177,17 +183,24 @@ def _get_live_status() -> dict[str, Any]:
 
 
 @router.get("/config", summary="Get current config (keys masked)")
-async def get_config() -> dict[str, Any]:
+async def get_config(
+    settings: Settings = Depends(get_settings)
+) -> dict[str, Any]:
     """
     Return the full running configuration as JSON.
     All provider API keys are masked (``nvapi-***fG9a``).
     """
-    settings = get_settings()
+    
     return _mask_settings(_settings_to_dict(settings))
 
 
 @router.post("/config", summary="Update config and hot-reload")
-async def post_config(request: Request) -> dict[str, Any]:
+async def post_config(
+    request: Request,
+    original: Settings = Depends(get_settings),
+    write_config_fn = Depends(get_write_config_fn),
+    settings_validator = Depends(get_settings_validator)
+) -> dict[str, Any]:
     """
     Accept a full config JSON body, validate it with Pydantic, restore any
     masked keys from the current in-memory config, write ``config.yaml``, and
@@ -201,16 +214,16 @@ async def post_config(request: Request) -> dict[str, Any]:
     except Exception as exc:
         raise HTTPException(status_code=400, detail=f"Invalid JSON: {exc}") from exc
 
-    original = get_settings()
+    
     body = _restore_redacted(body, original)
 
     # Validate via Pydantic before touching the file.
     try:
-        new_settings = Settings(**body)
+        new_settings = settings_validator(**body)
     except Exception as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
-    await asyncio.to_thread(write_config, new_settings)
+    await asyncio.to_thread(write_config_fn, new_settings)
 
     # The watchfiles watcher in server.py will pick up the file change and
     # call settings.reload() automatically.  Force a manual reload as well
@@ -310,11 +323,11 @@ async def import_config(request: Request) -> dict[str, Any]:
         raise HTTPException(status_code=422, detail=f"Invalid YAML: {exc}") from exc
 
     try:
-        new_settings = Settings(**body)
+        new_settings = settings_validator(**body)
     except Exception as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
-    await asyncio.to_thread(write_config, new_settings)
+    await asyncio.to_thread(write_config_fn, new_settings)
 
     try:
         from clasp.config.settings import reload_settings  # type: ignore[import]
@@ -367,7 +380,9 @@ async def get_catalog_defaults() -> dict[str, Any]:
 
 
 @router.get("/status", summary="Full system state snapshot")
-async def get_status() -> dict[str, Any]:
+async def get_status(
+    settings: Settings = Depends(get_settings)
+) -> dict[str, Any]:
     """
     Returns a complete status snapshot including per-provider health,
     key states, queue depths, and today's aggregate counters.
@@ -421,7 +436,7 @@ async def reset_provider(provider_name: str) -> dict[str, Any]:
     Clear all cooldown / circuit-breaker state for ``provider_name``.
     Sprint 2+: delegates to the KeyPool / CircuitBreaker instances.
     """
-    settings = get_settings()
+    
 
     if provider_name not in settings.providers:
         raise HTTPException(status_code=404, detail=f"Unknown provider: {provider_name!r}")
@@ -441,9 +456,11 @@ async def reset_provider(provider_name: str) -> dict[str, Any]:
 
 
 @router.post("/reset/all", summary="Clear cooldown for all providers")
-async def reset_all_providers() -> dict[str, Any]:
+async def reset_all_providers(
+    settings: Settings = Depends(get_settings)
+) -> dict[str, Any]:
     """Clear cooldown / circuit-breaker state for every configured provider."""
-    settings = get_settings()
+    
     reset_names: list[str] = []
 
     for name in settings.providers:

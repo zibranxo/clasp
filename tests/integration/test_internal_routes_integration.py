@@ -87,10 +87,9 @@ def settings_obj() -> _RuntimeSettings:
 
 
 def _make_app(monkeypatch: pytest.MonkeyPatch, settings_obj: _RuntimeSettings) -> FastAPI:
-    monkeypatch.setattr(internal_routes, "get_settings", lambda: settings_obj)
-    monkeypatch.setattr(internal_routes, "Settings", _SettingsValidator)
-
     app = FastAPI()
+    app.dependency_overrides[internal_routes.get_settings] = lambda: settings_obj
+    app.dependency_overrides[internal_routes.get_settings_validator] = lambda: _SettingsValidator
     app.add_middleware(IPGuard)
     app.include_router(internal_routes.router)
     return app
@@ -132,9 +131,8 @@ async def test_post_config_restores_redacted_keys_before_write(
         captured.append(data)
         return None
 
-    monkeypatch.setattr(internal_routes, "write_config", _fake_write_config)
-
     app = _make_app(monkeypatch, settings_obj)
+    app.dependency_overrides[internal_routes.get_write_config_fn] = lambda: _fake_write_config
     transport = httpx.ASGITransport(app=app, client=("127.0.0.1", 12345))
 
     payload = settings_obj.model_dump(mode="json")
@@ -145,7 +143,7 @@ async def test_post_config_restores_redacted_keys_before_write(
 
     assert resp.status_code == 200
     assert captured, "write_config should have been called"
-    assert captured[0]["providers"]["nvidia_nim"]["keys"][0] == "nvapi-abcdef1234"
+    assert captured[0]._data["providers"]["nvidia_nim"]["keys"][0] == "nvapi-abcdef1234"
 
 
 @pytest.mark.asyncio

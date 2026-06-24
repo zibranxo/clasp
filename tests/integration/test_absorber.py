@@ -43,6 +43,13 @@ Run with: pytest tests/integration/test_absorber.py -v --asyncio-mode=auto
 
 from __future__ import annotations
 
+from clasp.router import model_map
+import pytest
+
+@pytest.fixture(autouse=True)
+def _patch_resolve_model(monkeypatch):
+    monkeypatch.setattr(model_map, 'resolve_model', lambda *a, **k: 'test-model')
+
 import asyncio
 import json
 import time
@@ -178,6 +185,7 @@ def _make_registry(
             pool.buckets[key_idx].tpm_limit = None
             pool.buckets[key_idx].soft_threshold = 1.0
         registry._register(name, provider, pool)
+        registry._registration_order.append(name)
     return registry
 
 

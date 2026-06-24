@@ -21,7 +21,7 @@ from clasp.config.provider_catalog import ProviderProfile
 from clasp.api.detect import RequestType
 
 def run(coro):
-    return asyncio.get_event_loop().run_until_complete(coro)
+    return asyncio.run(coro)
 
 # ---------------------------------------------------------------------------
 # TokenBucket tests
@@ -101,6 +101,34 @@ class TestSelector(unittest.TestCase):
         res = run(select(req, config=config, registry=registry, settings=settings))
         self.assertIsNotNone(res)
         self.assertEqual(res[0].name, "nim")
+
+    def test_select_restricts_to_target_provider_prefixed_model(self):
+        req = AnthropicRequest.from_body({"model": "anthropic/gemini/gemini-1.5-pro", "messages": []})
+        config = SelectorConfig(
+            provider_chain=["nim", "gemini"],
+            providers={
+                "nim": ProviderEnableConfig(enabled=True),
+                "gemini": ProviderEnableConfig(enabled=True),
+            }
+        )
+        
+        registry = ProviderRegistry()
+        registry._providers = {
+            "nim": FakeProvider("nim"),
+            "gemini": FakeProvider("gemini"),
+        }
+        
+        profile = ProviderProfile(display_name="x", base_url="", transport="openai_chat", rpm_limit=40, tpm_limit=None, daily_token_limit=None, rpm_soft_threshold=0.8, cooldown_seconds=60, backoff_base_seconds=2, supports_tools=True, supports_vision=True, supports_thinking=True, max_context_tokens=100000, tier="free", free_tier_note="")
+        registry._key_pools = {
+            "nim": KeyPool("nim", ["k1"], profile, cooldown_tracker=CooldownManager()),
+            "gemini": KeyPool("gemini", ["k2"], profile, cooldown_tracker=CooldownManager()),
+        }
+        
+        settings = Settings()
+        res = run(select(req, config=config, registry=registry, settings=settings))
+        self.assertIsNotNone(res)
+        self.assertEqual(res[0].name, "gemini")
+
 
 if __name__ == '__main__':
     unittest.main()
