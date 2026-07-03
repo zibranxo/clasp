@@ -34,16 +34,19 @@ CLASP routes your AI requests across **18 upstream providers**, pre-emptively tr
 |---|---|
 | 🔀 **Multi-Provider Routing** | 18 upstream providers — automatically failover between them |
 | 🪣 **Token Bucket Rate Limiter** | Pre-emptive RPM + TPM tracking per provider and per API key |
+| 👥 **Shared Pool Mode** | Multi-tenant proxy mode with per-developer rate limits (`PerUserBucket`) |
 | 🔑 **Multi-Key Pool Rotation** | Multiple API keys per provider, dynamically rotated as they cool down |
-| 💾 **Two-Tier Response Cache** | In-memory LRU + SQLite persistence, survives restarts |
+| 💾 **Three-Tier Caching** | In-memory LRU, SQLite persistence, and **Semantic Cache** (FAISS + embeddings) |
 | 📡 **OpenAI Responses API** | Full `POST /v1/responses` endpoint for Codex compatibility |
 | 🌐 **Local Web Tools** | `web_search` (DuckDuckGo) + `web_fetch` (SSRF-safe DNS-pinned crawler) |
 | ⚡ **Agent Optimization Mocks** | Instantly answers Claude Code probes locally — zero upstream latency |
-| 🤖 **Telegram & Discord Bots** | Run Claude Code headlessly, remotely, from your phone |
+| ✂️ **Payload Optimization** | Context pruning (keep_edges), system prompt deduplication, thinking block stripping |
+| 🤖 **Remote Bots** | Run Claude Code headlessly, remotely, from your phone |
 | 🎙️ **Voice Transcription** | Whisper + NVIDIA NIM Riva gRPC voice-to-text for bot sessions |
 | 🧩 **Dynamic Model Selector** | All 18 providers' models selectable directly from `/model` in Claude Code |
 | 🛡️ **Circuit Breakers** | Per-key exponential backoff, keeps the rest of the pool alive |
 | 📊 **Real-Time Dashboard** | Live TUI + Web UI showing rate limit burn, queue depth, and key health |
+| 🔄 **GitHub Actions CI/CD** | Automated AI code reviews powered by free-tier providers |
 
 ---
 
@@ -268,6 +271,73 @@ enable_filepath_extraction_mock: true
 
 ---
 
+## ✂️ Payload Optimization
+
+CLASP automatically manipulates requests to keep tokens low and responses fast.
+
+| Optimization | What CLASP Does |
+|---|---|
+| **Context Pruning** | `keep_edges` strategy keeps the first few messages (system prompt) and the last N messages, automatically trimming the middle of massive conversations. |
+| **System Prompt Dedup** | Prevents agent loop-induced system prompt spam from inflating token counts. |
+| **Think Tag Stripping** | Strips out verbose `<thinking>` blocks when routing to DeepSeek or generic proxy tools to reduce prompt pollution. |
+
+Enable in config:
+```yaml
+optimizer:
+  local_probe_answering: true
+  system_prompt_dedup: true
+  context_pruning:
+    enabled: true
+    strategy: "keep_edges"
+    keep_first: 3
+    keep_last: 10
+```
+
+---
+
+## 👥 Shared Pool Mode (Multi-Tenant Gateway)
+
+Run CLASP on a VPS or through a tunnel to share your API keys securely with your team without risking massive rate limits. 
+
+When enabled, developers authenticate against CLASP using distinct tokens, and the proxy enforces a strict **Per-User Rate Limit** using a dedicated `PerUserBucket`. A single developer looping on an error will instantly hit a proxy-layer `429 Overloaded` without burning through your upstream provider keys.
+
+```yaml
+shared_pool:
+  enabled: true
+  per_user_rpm_limit: 20
+  auth_tokens:
+    - "dev_token_alice_123"
+    - "dev_token_bob_456"
+```
+
+---
+
+## 🧠 Semantic Cache (Optional ML Feature)
+
+Standard caches fail if you change a single character in your prompt. CLASP features an advanced, opt-in **Semantic Cache** powered by `sentence-transformers` and `faiss-cpu`. 
+
+When a query arrives, CLASP computes a high-dimensional vector (using `all-MiniLM-L6-v2`) in a background thread and measures Cosine Similarity against the cache index. If the semantic similarity is `> 0.95` (e.g. *"Write a python script..."* vs *"Give me python code..."*), it yields the cached response instantly.
+
+To enable, install the heavy ML dependencies:
+```bash
+pip install .[semantic]
+```
+```yaml
+cache:
+  semantic_enabled: true
+  semantic_threshold: 0.95
+```
+
+---
+
+## 🔄 GitHub Actions Integration (AI Code Review)
+
+CLASP includes a native CI/CD workflow that acts as a free, scalable AI code reviewer for your Pull Requests.
+
+Simply copy the `.github/workflows/clasp-review.yml` and `scripts/review.py` into your repository. Whenever a PR is opened, the workflow starts CLASP, pipes the `git diff` into the review script, and CLASP routes the code review task dynamically to whichever free-tier provider (e.g., NIM, Groq, Gemini) has available rate limits!
+
+---
+
 ## 🤖 Remote Access & Messaging Bots
 
 Run Claude Code **headlessly**, controlled remotely from Telegram or Discord — perfect for long-running tasks when you're away from your desk.
@@ -450,6 +520,7 @@ uv run clasp init
 | Telegram bot | `uv sync --extra telegram` |
 | Discord bot | `uv sync --extra discord` |
 | Whisper transcription | `uv sync --extra whisper` |
+| Semantic Cache | `uv sync --extra semantic` |
 | All optional features | `uv sync --all-extras` |
 
 ---
