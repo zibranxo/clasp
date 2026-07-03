@@ -177,6 +177,8 @@ class CacheConfig(BaseModel):
     memory_max_entries: int = 500
     sqlite_ttl_seconds: int = 300
     sqlite_path: str = "~/.clasp/cache.db"
+    semantic_enabled: bool = False
+    semantic_threshold: float = 0.95
 
 
 class ContextPruningConfig(BaseModel):

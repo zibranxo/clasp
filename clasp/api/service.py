@@ -150,6 +150,46 @@ def record_429_absorbed():
 def record_failover():
     _daily_counters["failovers_today"] += 1
 
+def get_daily_counters() -> dict:
+    import copy
+    export = copy.deepcopy(_daily_counters)
+    for pstats in export.get("providers", {}).values():
+        pstats.pop("_latencies", None)
+        
+    try:
+        from clasp.config.settings import get_settings
+        from clasp.ratelimit.shared_pool import get_shared_pool
+        settings = get_settings()
+        if settings.shared_pool.enabled:
+            pool = get_shared_pool(settings.shared_pool.per_user_rpm_limit)
+            export["shared_pool_usage"] = pool.get_daily_usage()
+    except Exception:
+        pass
+        
+    return export
+
+def set_daily_counters(counters: dict) -> None:
+    global _daily_counters
+    if counters:
+        _daily_counters.update(counters)
+        for key in ["requests_today", "tokens_today", "absorbed_429s_today", "failovers_today", "cache_hits_today"]:
+            _daily_counters.setdefault(key, 0)
+        _daily_counters.setdefault("providers", {})
+        for pstats in _daily_counters["providers"].values():
+            if "_latencies" not in pstats:
+                pstats["_latencies"] = collections.deque(maxlen=100)
+                
+        if "shared_pool_usage" in counters:
+            try:
+                from clasp.config.settings import get_settings
+                from clasp.ratelimit.shared_pool import get_shared_pool
+                settings = get_settings()
+                if settings.shared_pool.enabled:
+                    pool = get_shared_pool(settings.shared_pool.per_user_rpm_limit)
+                    pool.set_daily_usage(counters["shared_pool_usage"])
+            except Exception:
+                pass
+
 # ---------------------------------------------------------------------------
 # Public entry points (called by proxy_routes.py)
 # ---------------------------------------------------------------------------
@@ -223,6 +263,22 @@ async def dispatch_stream(
         settings = get_settings()
     except Exception:
         settings = None
+
+    if cache is not None and settings and settings.cache.semantic_enabled:
+        from clasp.cache.semantic_cache import get_semantic_cache
+        semantic_cache = get_semantic_cache(settings.cache.semantic_threshold)
+        semantic_chunks = await semantic_cache.lookup(request)
+        if semantic_chunks is not None:
+            _daily_counters["cache_hits_today"] += 1
+            if _LOG:
+                _logger.info(
+                    "semantic cache hit — skipping provider dispatch entirely",
+                    request_id=request_id,
+                    model=request.get("model"),
+                )
+            for chunk in semantic_chunks:
+                yield chunk
+            return
 
     if settings is not None:
         from clasp.api.optimization_handlers import try_optimizations  # noqa: PLC0415
@@ -513,6 +569,13 @@ async def dispatch_stream(
     # ── STEP 9 (post-dispatch): cache the complete, successful response ──
     if cache is not None and collected and success:
         await cache.set(cache_key, collected)
+        
+        if settings and settings.cache.semantic_enabled:
+            from clasp.cache.semantic_cache import get_semantic_cache
+            semantic_cache = get_semantic_cache(settings.cache.semantic_threshold)
+            import asyncio
+            asyncio.create_task(semantic_cache.store(request, collected))
+            
         if _LOG:
             _logger.debug(
                 "cache write",
@@ -590,6 +653,7 @@ async def handle_request(
     *,
     request_id: str | None = None,
     stream: bool | None = None,
+    user_id: str | None = None,
     detect_fn=None,
     select_fn=None,
     optimize_fn=None,
@@ -602,6 +666,26 @@ async def handle_request(
     request_id = request_id or _make_request_id()
     if stream is None:
         stream = bool(body.get("stream", False))
+
+    try:
+        from clasp.config.settings import get_settings  # noqa: PLC0415
+        settings = get_settings()
+    except Exception:
+        settings = None
+
+    if settings and settings.shared_pool.enabled and user_id:
+        from clasp.ratelimit.shared_pool import get_shared_pool
+        pool = get_shared_pool(settings.shared_pool.per_user_rpm_limit)
+        if not await pool.check_and_consume(user_id):
+            err = build_anthropic_error(
+                ErrorType.OVERLOADED,
+                f"Shared pool rate limit exceeded for user: {user_id[:8]}..."
+            )
+            if stream:
+                async def _err_stream():
+                    yield f"event: error\ndata: {json.dumps(err)}\n\n".encode("utf-8")
+                return _err_stream()
+            return err
 
     if stream:
         return dispatch_stream(

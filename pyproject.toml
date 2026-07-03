@@ -29,6 +29,10 @@ dev = [
     "ruff>=0.7",
     "ty>=0.0.1a1",
 ]
+semantic = [
+    "sentence-transformers>=3.0",
+    "faiss-cpu>=1.8",
+]
 
 [project.scripts]
 clasp = "clasp.cli.main:app"

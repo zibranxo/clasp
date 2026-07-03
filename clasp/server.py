@@ -73,6 +73,19 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.cooldown_mgr = cooldown_mgr
     app.state.queue_mgr = queue_mgr
 
+    from clasp.ratelimit.persistence import load_state, periodic_save_task
+    from clasp.api.service import get_daily_counters, set_daily_counters
+
+    # Load persistent state (cooldowns + daily metrics)
+    loaded_counters = await asyncio.to_thread(load_state, cooldown_mgr)
+    set_daily_counters(loaded_counters)
+
+    # Start background task to persist state periodically
+    save_task = asyncio.create_task(
+        periodic_save_task(cooldown_mgr, daily_counters_provider=get_daily_counters)
+    )
+    logger.info("periodic state save task started")
+
     drain_task = asyncio.create_task(
         queue_mgr.drain_task(
             config=config,
@@ -91,11 +104,14 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         yield
     finally:
         drain_task.cancel()
+        save_task.cancel()
         try:
-            await drain_task
+            await asyncio.gather(drain_task, save_task)
         except asyncio.CancelledError:
             pass
-        logger.info("queue drain task stopped")
+        except Exception as e:
+            logger.warning(f"Error shutting down background tasks: {e}")
+        logger.info("background tasks stopped")
 
         # ── ADOPTED FROM V2: Flush async log sinks before process exit ────
         from loguru import logger as _log

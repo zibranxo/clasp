@@ -1,0 +1,38 @@
+name: AI Code Review
+on:
+  pull_request:
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          
+      - name: Install CLASP
+        run: |
+          pip install httpx
+          # In a real environment, you might pip install git+https://github.com/your-org/clasp.git
+          pip install .
+          
+      - name: Run review via CLASP
+        env:
+          # Feed CLASP whatever free-tier API keys you have available for CI/CD
+          NVIDIA_NIM_API_KEY: ${{ secrets.NIM_API_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+        run: |
+          # Start CLASP server in the background
+          clasp server --no-browser &
+          
+          # Wait for the server to boot up
+          sleep 3
+          
+          # Run the review script
+          git diff origin/${{ github.event.pull_request.base.ref }} | python scripts/review.py

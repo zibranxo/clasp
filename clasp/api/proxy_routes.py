@@ -44,11 +44,11 @@ def get_handle_request_fn():
 def get_is_local_probe_fn():
     return is_local_probe
 
-def _verify_bearer(request: Request, settings: Settings = Depends(get_settings)) -> None:
+def _verify_bearer(request: Request, settings: Settings = Depends(get_settings)) -> str | None:
     """
     FastAPI dependency: reject non-loopback requests with the wrong Bearer token.
+    If Shared Pool Mode is enabled, validates against auth_tokens and returns the matched token as user_id.
 
-    Returns ``None`` on success (FastAPI discards the return value of Depends).
     Raises ``HTTPException(401)`` on failure.
     """
     
@@ -59,8 +59,16 @@ def _verify_bearer(request: Request, settings: Settings = Depends(get_settings))
         _raise_401("Missing Authorization header")
 
     token = auth_header[7:].strip()  # strip "Bearer "
+    
+    if settings.shared_pool.enabled:
+        if token in settings.shared_pool.auth_tokens:
+            return token
+        _raise_401("Invalid Shared Pool API key")
+    
     if token != expected:
         _raise_401("Invalid API key")
+        
+    return None
 
 
 def _raise_401(message: str) -> None:
@@ -153,11 +161,12 @@ async def count_tokens(request: Request) -> JSONResponse:
 # ---------------------------------------------------------------------------
 
 
-@router.post("/v1/messages", dependencies=[Depends(_verify_bearer)])
+@router.post("/v1/messages")
 async def messages(
     request: Request,
     is_local_probe_fn = Depends(get_is_local_probe_fn),
-    handle_request_fn = Depends(get_handle_request_fn)
+    handle_request_fn = Depends(get_handle_request_fn),
+    user_id: str | None = Depends(_verify_bearer)
 ):
     """
     Main proxy endpoint.
@@ -227,7 +236,7 @@ async def messages(
         return JSONResponse(local_resp)
 
     # ── Delegate to service ─────────────────────────────────────────────────
-    result = await handle_request_fn(body, request_id=request_id, stream=want_stream)
+    result = await handle_request_fn(body, request_id=request_id, stream=want_stream, user_id=user_id)
 
     if want_stream:
         # result is an AsyncIterator[str]
@@ -246,10 +255,11 @@ async def messages(
 # ---------------------------------------------------------------------------
 
 
-@router.post("/v1/responses", dependencies=[Depends(_verify_bearer)])
+@router.post("/v1/responses")
 async def responses(
     request: Request,
-    handle_request_fn = Depends(get_handle_request_fn)
+    handle_request_fn = Depends(get_handle_request_fn),
+    user_id: str | None = Depends(_verify_bearer)
 ):
     """
     OpenAI Responses-compatible proxy endpoint.
@@ -303,6 +313,7 @@ async def responses(
         anthropic_payload,
         request_id=request_id,
         stream=True,
+        user_id=user_id,
     )
 
     sse_generator = adapter.iter_sse_from_anthropic(result_stream, body)
