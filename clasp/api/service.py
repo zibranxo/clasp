@@ -299,6 +299,21 @@ async def dispatch_stream(
     # Store the original model so the transport layer can use it in the response
     anthropic_request.body["_original_model"] = original_model
 
+    # Claude Code notoriously injects its requested model string into the system
+    # prompt (e.g. "The user is powered by the model <model_name>"). When routing
+    # to non-Anthropic models (like Kimi or Llama), seeing this bizarre proxy slug
+    # can severely distract them from instruction following. We scrub it out here
+    # and replace it with a standard Claude 3.5 Sonnet string so the model thinks
+    # it is just standard Claude.
+    if original_model and "system" in anthropic_request.body:
+        system_val = anthropic_request.body["system"]
+        if isinstance(system_val, str):
+            anthropic_request.body["system"] = system_val.replace(original_model, "claude-3-5-sonnet-20241022")
+        elif isinstance(system_val, list):
+            for block in system_val:
+                if isinstance(block, dict) and block.get("type") == "text":
+                    block["text"] = block["text"].replace(original_model, "claude-3-5-sonnet-20241022")
+
     # ── STEP 9 (pre-dispatch): request-shaping optimizer passes ────────
     if optimize_fn is None:
         try:
