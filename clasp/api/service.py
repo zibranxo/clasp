@@ -55,6 +55,100 @@ except ImportError:  # pragma: no cover
 
 from clasp.router.types import AnthropicRequest
 
+import statistics
+import collections
+
+_uptime_start = time.monotonic()
+_daily_counters = {
+    "requests_today": 0,
+    "tokens_today": 0,
+    "absorbed_429s_today": 0,
+    "failovers_today": 0,
+    "cache_hits_today": 0,
+    "providers": {}
+}
+
+def _init_p_stats(pname: str):
+    if pname not in _daily_counters["providers"]:
+        _daily_counters["providers"][pname] = {
+            "requests_today": 0,
+            "tokens_today": 0,
+            "errors_today": 0,
+            "_latencies": collections.deque(maxlen=100)
+        }
+
+async def get_service_stats() -> dict[str, Any]:
+    from clasp.config.settings import get_settings
+    from clasp.providers.registry import get_registry
+    from clasp.queue.manager import get_queue_manager
+
+    settings = get_settings()
+    registry = get_registry()
+    q_mgr = get_queue_manager()
+
+    q_stats = q_mgr.get_queue_stats() if hasattr(q_mgr, "get_queue_stats") else {
+        "depth": q_mgr.depth if hasattr(q_mgr, "depth") else 0,
+        "interactive": 0,
+        "background": 0
+    }
+
+    providers_status = {}
+    for name, pcfg in settings.providers.items():
+        _init_p_stats(name)
+        p_stats = _daily_counters["providers"][name]
+        lats = p_stats["_latencies"]
+        p50 = statistics.median(lats) if lats else None
+
+        if not pcfg.enabled:
+            status = "OFF"
+            keys_info = []
+        else:
+            kp = registry.get_key_pool(name)
+            if kp:
+                h_sum = await kp.health_summary()
+                keys_info = h_sum.get("keys", [])
+                
+                # Determine aggregate status
+                if h_sum.get("healthy", 0) > 0:
+                    status = "HEALTHY"
+                else:
+                    # check if circuit open or cooling
+                    has_open = any(k.get("status") == "circuit_open" for k in keys_info)
+                    status = "CIRCUIT_OPEN" if has_open else "COOLING_DOWN"
+            else:
+                status = "OFF"
+                keys_info = []
+
+        providers_status[name] = {
+            "status": status,
+            "requests_today": p_stats["requests_today"],
+            "tokens_today": p_stats["tokens_today"],
+            "daily_token_limit": getattr(pcfg, "daily_token_limit", None),
+            "errors_today": p_stats["errors_today"],
+            "p50_latency_ms": p50,
+            "keys": keys_info
+        }
+
+    return {
+        "status": "healthy",
+        "uptime_seconds": int(time.monotonic() - _uptime_start),
+        "active_requests": 0, # not tracked right now
+        "queue_depth": q_stats.get("depth", 0),
+        "queue_interactive": q_stats.get("interactive", 0),
+        "queue_background": q_stats.get("background", 0),
+        "requests_today": _daily_counters["requests_today"],
+        "tokens_today": _daily_counters["tokens_today"],
+        "absorbed_429s_today": _daily_counters["absorbed_429s_today"],
+        "failovers_today": _daily_counters["failovers_today"],
+        "cache_hits_today": _daily_counters["cache_hits_today"],
+        "providers": providers_status
+    }
+
+def record_429_absorbed():
+    _daily_counters["absorbed_429s_today"] += 1
+
+def record_failover():
+    _daily_counters["failovers_today"] += 1
 
 # ---------------------------------------------------------------------------
 # Public entry points (called by proxy_routes.py)
@@ -89,6 +183,9 @@ async def dispatch_stream(
     request_id = request_id or _make_request_id()
     cache = get_cache()
     cache_key = hash_request(request)
+    
+    t0 = time.monotonic()
+    _daily_counters["requests_today"] += 1
 
     if _LOG:
         _logger.debug(
@@ -103,6 +200,7 @@ async def dispatch_stream(
     if cache is not None:
         cached_chunks = await cache.get(cache_key)
         if cached_chunks is not None:
+            _daily_counters["cache_hits_today"] += 1
             if _LOG:
                 _logger.info(
                     "cache hit — skipping provider dispatch entirely",
@@ -387,6 +485,21 @@ async def dispatch_stream(
                     pass
             else:
                 await _kp.record_error(key_index)
+                
+        pname = getattr(provider, "name", getattr(provider, "provider_name", "")) if provider else ""
+        if pname:
+            _init_p_stats(pname)
+            if success:
+                latency_ms = round((time.monotonic() - t0) * 1000)
+                _daily_counters["providers"][pname]["_latencies"].append(latency_ms)
+                _daily_counters["providers"][pname]["requests_today"] += 1
+                
+                used_tokens = actual_tokens or estimated_tokens
+                _daily_counters["providers"][pname]["tokens_today"] += used_tokens
+                _daily_counters["tokens_today"] += used_tokens
+            else:
+                _daily_counters["providers"][pname]["errors_today"] += 1
+                
         if _LOG:
             _logger.info(
                 "service: request complete",

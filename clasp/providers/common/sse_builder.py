@@ -323,6 +323,10 @@ class SSEBuilder:
         # Harvest id / name (only on the first delta for this tool index)
         if tc_id := tc.get("id"):
             buf.tool_id = tc_id
+        elif not buf.tool_id:
+            import uuid
+            buf.tool_id = f"toolu_clasp_{uuid.uuid4().hex[:8]}"
+            
         func: dict[str, Any] = tc.get("function") or {}
         if func_name := func.get("name"):
             buf.name = func_name

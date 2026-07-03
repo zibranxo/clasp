@@ -123,7 +123,7 @@ def _settings_to_dict(s: Settings) -> dict[str, Any]:
 # Sprint 2+ — these will be populated by the rate-limit / queue layer.
 # For Sprint 1 they return safe stubs so the UI can render without errors.
 
-def _get_live_status() -> dict[str, Any]:
+async def _get_live_status() -> dict[str, Any]:
     """
     Return the current system status snapshot.
 
@@ -133,7 +133,7 @@ def _get_live_status() -> dict[str, Any]:
     try:
         from clasp.api.service import get_service_stats  # type: ignore[import]
 
-        return get_service_stats()
+        return await get_service_stats()
     except ImportError:
         pass
 
@@ -390,7 +390,7 @@ async def get_status(
     Sprint 1: returns a live-accurate stub (no rate-limit engine yet).
     Sprint 2+: populated by the rate-limit / queue layer.
     """
-    return _get_live_status()
+    return await _get_live_status()
 
 
 @router.get("/stream", summary="SSE: live status every 2 s")
@@ -409,7 +409,7 @@ async def stream_status(request: Request) -> StreamingResponse:
             while True:
                 if await request.is_disconnected():
                     break
-                snapshot = _get_live_status()
+                snapshot = await _get_live_status()
                 yield f"data: {json.dumps(snapshot)}\n\n"
                 await asyncio.sleep(2)
         except asyncio.CancelledError:
@@ -683,7 +683,8 @@ async def clear_cache() -> dict[str, Any]:
         from clasp.cache.response_cache import get_cache  # type: ignore[import]
 
         cache = get_cache()
-        entries_removed = await cache.clear()
+        if cache:
+            entries_removed = await cache.clear()
     except ImportError:
         pass
 
