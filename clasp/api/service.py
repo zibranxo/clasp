@@ -257,7 +257,7 @@ async def dispatch_stream(
     provider, api_key, key_index = selection
 
     # ── Local server tool validation for OpenAI-compatible providers ─────────
-    provider_name = getattr(provider, "provider_name", "")
+    provider_name = getattr(provider, "name", getattr(provider, "provider_name", ""))
     from clasp.config.provider_catalog import PROVIDER_CATALOG
     profile = PROVIDER_CATALOG.get(provider_name)
     is_openai_chat = profile is not None and profile.transport == "openai_chat"
@@ -279,7 +279,7 @@ async def dispatch_stream(
             )
     # Retrieve key_pool for outcome feedback after dispatch.
     from clasp.providers.registry import get_registry  # noqa: PLC0415
-    _kp = get_registry().get_key_pool(getattr(provider, "provider_name", ""))
+    _kp = get_registry().get_key_pool(getattr(provider, "name", getattr(provider, "provider_name", "")))
 
     # Update request model to the resolved model slug
     try:
@@ -290,7 +290,7 @@ async def dispatch_stream(
 
     if settings is not None:
         from clasp.router.model_map import resolve_model  # noqa: PLC0415
-        model_slug = resolve_model(anthropic_request, getattr(provider, "provider_name", ""), settings)
+        model_slug = resolve_model(anthropic_request, getattr(provider, "name", getattr(provider, "provider_name", "")), settings)
         if model_slug:
             anthropic_request.body["model"] = model_slug
 
@@ -315,7 +315,7 @@ async def dispatch_stream(
                 _logger.error(
                     "service: optimize failed (continuing with original body)",
                     request_id=request_id,
-                    provider=getattr(provider, "provider_name", None),
+                    provider=getattr(provider, "name", getattr(provider, "provider_name", None)),
                     error=str(exc),
                 )
             # Optimization is best-effort — don't abort the request on failure.
@@ -339,7 +339,7 @@ async def dispatch_stream(
             _logger.error(
                 "service: provider stream failed",
                 request_id=request_id,
-                provider=getattr(provider, "provider_name", None),
+                provider=getattr(provider, "name", getattr(provider, "provider_name", None)),
                 key_index=key_index,
                 error=str(exc),
             )
@@ -371,7 +371,7 @@ async def dispatch_stream(
             _logger.info(
                 "service: request complete",
                 request_id=request_id,
-                provider=getattr(provider, "provider_name", None),
+                provider=getattr(provider, "name", getattr(provider, "provider_name", None)),
                 key_index=key_index,
                 stream=True,
                 success=success,

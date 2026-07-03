@@ -196,6 +196,10 @@ class SSEBuilder:
             )
             return []
 
+    def is_done(self) -> bool:
+        """True after the final tail (message_delta + message_stop) has been emitted."""
+        return self._tail_emitted
+
     def flush(self) -> list[str]:
         """
         Emit any events that were deferred until the stream ends.

@@ -38,6 +38,17 @@ SAFETY_BLOCK_MESSAGE = "Response blocked by Gemini safety filters. Try rephrasin
 
 
 class GeminiProvider(OpenAIChatTransport):
+    """Gemini via OpenAI-compatible endpoint.
+
+    SAFETY finish_reason handling: Gemini may return finish_reason="SAFETY"
+    which needs to be mapped to an Anthropic invalid_request_error. This is
+    handled by SSEBuilder's stop-reason mapping (unmapped reasons default to
+    "end_turn") and error_mapper.py's content-filter detection on error
+    responses. The explicit error_finish_reasons hook originally planned here
+    was never added to OpenAIChatTransport, so we rely on the existing
+    error classification pipeline instead.
+    """
+
     def __init__(
         self,
         *,
@@ -56,5 +67,4 @@ class GeminiProvider(OpenAIChatTransport):
             extra_headers=extra_headers,
             static_models=static_models,
             models_cache_ttl_seconds=models_cache_ttl_seconds,
-            error_finish_reasons={"SAFETY": SAFETY_BLOCK_MESSAGE},
         )

@@ -92,6 +92,7 @@ from clasp.providers.openai_transport import OpenAIChatTransport
 from clasp.providers.anthropic_transport import AnthropicMessagesTransport
 from clasp.providers.nvidia_nim import NvidiaNimProvider
 from clasp.providers.deepseek import DeepSeekProvider
+from clasp.providers.gemini import GeminiProvider
 from clasp.ratelimit.key_pool import KeyPool
 
 if TYPE_CHECKING:
@@ -108,20 +109,20 @@ if TYPE_CHECKING:
 PROVIDER_CLASS_MAP: dict[str, type[BaseProvider]] = {
     "nvidia_nim": NvidiaNimProvider,
     # Sprint 4 providers — use generic transports until concrete classes land:
-    "gemini": OpenAIChatTransport,
+    "gemini": GeminiProvider,
     "cerebras": OpenAIChatTransport,
     "groq": OpenAIChatTransport,
     "fireworks": AnthropicMessagesTransport,
     "openrouter": AnthropicMessagesTransport,
     "mistral": OpenAIChatTransport,
     "together": OpenAIChatTransport,
-    "ollama": AnthropicMessagesTransport,
-    "lm_studio": AnthropicMessagesTransport,
+    "ollama": OpenAIChatTransport,
+    "lm_studio": OpenAIChatTransport,
     # Milestone 2 Providers
     "mistral_codestral": OpenAIChatTransport,
     "deepseek": DeepSeekProvider,
     "kimi": AnthropicMessagesTransport,
-    "llamacpp": AnthropicMessagesTransport,
+    "llamacpp": OpenAIChatTransport,
     "opencode": OpenAIChatTransport,
     "opencode_go": OpenAIChatTransport,
     "wafer": AnthropicMessagesTransport,

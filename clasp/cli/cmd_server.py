@@ -160,12 +160,12 @@ def _print_startup_banner(settings, host: str, port: int) -> None:
 
     from clasp.server import __version__
 
-    typer.echo(f"\n◆ CLASP v{__version__} starting…")
-    typer.echo(f"  ✓ Config loaded")
-    typer.echo(f"  ✓ Providers: {provider_str}")
-    typer.echo(f"  ✓ Proxy running at http://{host}:{port}")
-    typer.echo(f"  ✓ Config UI open at http://{host}:{port}")
-    typer.echo(f"  → Run `clasp claude` in another terminal to start coding.")
+    typer.echo(f"\n* CLASP v{__version__} starting...")
+    typer.echo(f"  + Config loaded")
+    typer.echo(f"  + Providers: {provider_str}")
+    typer.echo(f"  + Proxy running at http://{host}:{port}")
+    typer.echo(f"  + Config UI open at http://{host}:{port}")
+    typer.echo(f"  > Run `clasp claude` in another terminal to start coding.")
     typer.echo("  Press Ctrl+C to stop.\n")
 
 

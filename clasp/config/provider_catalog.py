@@ -235,8 +235,8 @@ PROVIDER_CATALOG: dict[str, ProviderProfile] = {
 
     "ollama": ProviderProfile(
         display_name="Ollama (local)",
-        base_url="http://localhost:11434",
-        transport="anthropic_messages",
+        base_url="http://localhost:11434/v1",
+        transport="openai_chat",
         # Artificially high so the rate limiter never blocks local requests.
         rpm_limit=9_999,
         tpm_limit=None,
@@ -255,8 +255,8 @@ PROVIDER_CATALOG: dict[str, ProviderProfile] = {
 
     "lm_studio": ProviderProfile(
         display_name="LM Studio (local)",
-        base_url="http://localhost:1234",
-        transport="anthropic_messages",
+        base_url="http://localhost:1234/v1",
+        transport="openai_chat",
         rpm_limit=9_999,
         tpm_limit=None,
         daily_token_limit=None,
@@ -328,7 +328,7 @@ PROVIDER_CATALOG: dict[str, ProviderProfile] = {
     "llamacpp": ProviderProfile(
         display_name="llama.cpp",
         base_url="http://localhost:8080/v1",
-        transport="anthropic_messages",
+        transport="openai_chat",
         rpm_limit=9_999,
         tpm_limit=None,
         daily_token_limit=None,

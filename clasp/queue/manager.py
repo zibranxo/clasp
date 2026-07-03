@@ -50,13 +50,15 @@ class QueueManager:
     def __init__(self, max_wait_seconds: float = 180.0, drain_poll_interval: float = 1.0) -> None:
         self.max_wait_seconds = max_wait_seconds
         self.drain_poll_interval = drain_poll_interval
-        self._q: "asyncio.PriorityQueue[tuple[int, float, QueuedRequest]]" = (
+        self._q: "asyncio.PriorityQueue[tuple[int, float, int, QueuedRequest]]" = (
             asyncio.PriorityQueue()
         )
+        self._seq: int = 0  # monotonic tiebreaker — prevents QueuedRequest comparison
 
     async def enqueue(self, req: QueuedRequest) -> None:
         """Add *req* to the priority queue, to be picked up by drain_task()."""
-        await self._q.put((req.priority, req.enqueued_at, req))
+        self._seq += 1
+        await self._q.put((req.priority, req.enqueued_at, self._seq, req))
         logger.info(
             "request queued",
             priority=req.priority,
@@ -92,7 +94,7 @@ class QueueManager:
 
         while True:
             try:
-                _priority, _ts, req = await self._q.get()
+                _priority, _ts, _seq, req = await self._q.get()
                 selection = None
                 while selection is None:
                     selection = await selector.select(
@@ -103,7 +105,8 @@ class QueueManager:
                     )
                     if selection is None:
                         if time.monotonic() - req.enqueued_at > self.max_wait_seconds:
-                            req.future.set_exception(QueueTimeoutError())
+                            if not req.future.done():
+                                req.future.set_exception(QueueTimeoutError())
                             self._q.task_done()
                             break
                         await asyncio.sleep(self.drain_poll_interval)
@@ -116,9 +119,11 @@ class QueueManager:
                         ):
                             raw = chunk.decode("utf-8") if isinstance(chunk, bytes) else chunk
                             chunks.append(raw)
-                        req.future.set_result(chunks)
+                        if not req.future.done():
+                            req.future.set_result(chunks)
                     except Exception as e:  # noqa: BLE001
-                        req.future.set_exception(e)
+                        if not req.future.done():
+                            req.future.set_exception(e)
                     finally:
                         self._q.task_done()
             except asyncio.CancelledError:

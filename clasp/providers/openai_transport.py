@@ -221,10 +221,34 @@ class OpenAIChatTransport(BaseProvider):
                 async for raw_line in response.aiter_lines():
                     if not raw_line:
                         continue
-                    for event in builder.process_chunk(raw_line):
-                        yield event
-                    if builder.is_done():
+                    # Strip SSE "data: " prefix — aiter_lines() yields
+                    # raw SSE lines like 'data: {"choices":[...]}'
+                    if raw_line.startswith("data: "):
+                        data = raw_line[6:]
+                    elif raw_line.startswith("data:"):
+                        data = raw_line[5:]
+                    else:
+                        # Skip event:, id:, retry: lines and SSE comments
+                        continue
+
+                    data = data.strip()
+                    if data == "[DONE]":
+                        # End of stream — flush any pending events
+                        for ev in builder.flush():
+                            yield ev
                         break
+
+                    try:
+                        chunk = json.loads(data)
+                    except json.JSONDecodeError:
+                        logger.warning(
+                            f"{self.name}: skipping unparseable SSE data",
+                            data=data[:200],
+                        )
+                        continue
+
+                    for event in builder.process_chunk(chunk):
+                        yield event
 
         except httpx.TimeoutException as e:
             raise ProviderTimeoutError(f"{self.name}: timed out: {e}") from e

@@ -1,679 +1,985 @@
 <!--
-  CLASP web UI — Full build (plan.md §15, Phase 7).
-  6 panels: Providers, Models, Dashboard, Routing, Advanced, Logs.
+  CLASP web UI — Neural Command Center
+  Redesigned: glassmorphism, parallax, command palette, live clock,
+  animated stats. Zero endpoint changes — all Alpine bindings preserved.
 -->
 <!DOCTYPE html>
-<html lang="en" class="h-full bg-gray-950 text-gray-100">
+<html lang="en">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>CLASP — Claude API Switching Proxy</title>
-  <script src="https://cdn.tailwindcss.com"></script>
-  <!-- Collapse plugin must load BEFORE alpine core for the x-collapse
-       directive used on the Providers panel cards to work. -->
+  <meta name="description" content="CLASP — Rate-limit-aware multi-provider Claude API proxy. Live dashboard.">
+  <title>CLASP — Neural Command Center</title>
+
+  <!-- Fonts -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@600;700&family=Plus+Jakarta+Sans:ital,wght@0,300;0,400;0,500;0,600;1,400&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+
+  <!-- Styles -->
+  <link rel="stylesheet" href="/ui/assets/style.css">
+
+  <!-- Alpine collapse plugin must load BEFORE core -->
   <script defer src="https://cdn.jsdelivr.net/npm/@alpinejs/collapse@3.x.x/dist/cdn.min.js"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3/dist/cdn.min.js"></script>
+
+  <!-- App logic -->
   <script src="/ui/assets/app.js"></script>
-  <link rel="stylesheet" href="/ui/assets/style.css">
-  <script>
-    tailwind.config = {
-      theme: {
-        extend: {
-          colors: {
-            clasp: { green: '#4ade80', dark: '#030712' }
-          }
-        }
-      }
-    }
-  </script>
 </head>
-<body class="h-full flex flex-col overflow-hidden" x-data="claspApp()" x-init="init()">
 
-  <!-- ── Header ───────────────────────────────────────────────── -->
-  <header class="shrink-0 flex items-center gap-3 px-5 py-3 bg-gray-900
-                 border-b border-gray-800 z-10">
-    <span class="font-mono font-bold text-green-400 text-xl tracking-tight">◆ CLASP</span>
-    <span class="text-gray-600 text-sm font-mono" x-text="'v' + meta.version"></span>
+<body x-data="claspApp()" x-init="init()">
 
-    <div class="flex items-center gap-1.5 ml-2">
-      <span class="w-2 h-2 rounded-full transition-colors"
-            :class="meta.status === 'healthy' ? 'bg-green-400' : 'bg-red-400'"></span>
-      <span class="text-sm text-gray-300"
-            x-text="meta.status === 'healthy' ? 'RUNNING' : 'ERROR'"></span>
-      <span class="text-gray-600 text-sm" x-text="'· port ' + meta.port"></span>
+  <!-- ── Parallax ambient background ─────────────────────────── -->
+  <div class="bg-orbs" aria-hidden="true">
+    <div class="orb-shell orb-shell-1" id="orb-shell-1">
+      <div class="orb orb-1" id="orb-1"></div>
     </div>
+    <div class="orb-shell orb-shell-2" id="orb-shell-2">
+      <div class="orb orb-2" id="orb-2"></div>
+    </div>
+    <div class="orb-shell orb-shell-3" id="orb-shell-3">
+      <div class="orb orb-3" id="orb-3"></div>
+    </div>
+  </div>
 
-    <div class="ml-auto flex items-center gap-3">
-      <!-- Unsaved changes indicator -->
+  <!-- Film grain -->
+  <div class="noise" aria-hidden="true"></div>
+
+  <!-- ── App shell ────────────────────────────────────────────── -->
+  <div class="app-shell">
+
+    <!-- ── Header ──────────────────────────────────────────────── -->
+    <header class="app-header" role="banner">
+
+      <!-- Logo -->
+      <a href="/ui" class="logo" aria-label="CLASP home">
+        <span class="logo-glyph" aria-hidden="true">◈</span>
+        <span class="logo-wordmark">CLASP</span>
+      </a>
+
+      <!-- Version pill -->
+      <span class="header-version" x-text="'v' + meta.version"></span>
+
+      <!-- Status ring -->
+      <div class="status-ring-wrap" role="status" :aria-label="'Server status: ' + (meta.status === 'healthy' ? 'healthy' : 'error')">
+        <div class="status-ring" :class="meta.status !== 'healthy' ? 'error' : ''">
+          <span class="status-ring-dot"></span>
+          <span class="status-ring-pulse"></span>
+        </div>
+        <span class="status-label" :class="meta.status !== 'healthy' ? 'error' : ''"
+              x-text="meta.status === 'healthy' ? 'LIVE' : 'ERROR'"></span>
+        <span class="status-port" x-text="'· :' + meta.port"></span>
+      </div>
+
+      <!-- Live clock -->
+      <span class="header-clock" x-text="currentTime" aria-label="Current time"></span>
+
+      <div class="header-spacer"></div>
+
+      <!-- Cmd+K hint -->
+      <button class="btn-ghost" style="font-family:'JetBrains Mono',monospace;font-size:0.75rem;gap:8px;"
+              @click="showCommandPalette = true" aria-label="Open command palette (Ctrl+K)">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+        <kbd style="background:var(--surface-2);border:1px solid var(--border);border-radius:4px;padding:1px 5px;font-size:0.625rem;">⌘K</kbd>
+      </button>
+
+      <!-- Unsaved indicator -->
       <template x-if="dirty">
-        <div class="flex items-center gap-2">
-          <span class="text-yellow-400 text-sm animate-pulse">● Unsaved changes</span>
-          <button @click="saveAndApply()"
-                  :disabled="saving"
-                  class="px-3 py-1.5 bg-green-600 hover:bg-green-500 disabled:opacity-50
-                         rounded text-sm font-medium transition-colors">
-            <span x-show="!saving">Save & Apply</span>
+        <div class="unsaved-bar">
+          <span class="unsaved-dot">● Unsaved changes</span>
+          <button class="btn-save magnetic" id="btn-save-apply"
+                  @click="saveAndApply()" :disabled="saving" aria-live="polite">
+            <span x-show="!saving">Save &amp; Apply</span>
             <span x-show="saving">Saving…</span>
           </button>
-          <button @click="discardChanges()"
-                  class="px-3 py-1.5 text-gray-400 hover:text-white text-sm transition-colors">
-            Discard
-          </button>
-        </div>
-      </template>
-    </div>
-  </header>
-
-  <!-- ── Body ─────────────────────────────────────────────────── -->
-  <div class="flex flex-1 overflow-hidden">
-
-    <!-- Sidebar nav -->
-    <nav class="w-52 shrink-0 bg-gray-900 border-r border-gray-800
-                flex flex-col py-4 overflow-y-auto">
-      <template x-for="item in nav" :key="item.id">
-        <button @click="panel = item.id"
-                :class="panel === item.id
-                  ? 'bg-gray-800 text-white border-l-2 border-green-400'
-                  : 'text-gray-400 hover:text-white hover:bg-gray-800/50 border-l-2 border-transparent'"
-                class="flex items-center gap-3 px-4 py-2.5 text-sm w-full text-left transition-all">
-          <span class="text-base" x-text="item.icon"></span>
-          <span x-text="item.label"></span>
-        </button>
-      </template>
-
-      <!-- Sidebar footer: live mini-stats -->
-      <div class="mt-auto px-4 pt-4 border-t border-gray-800 text-xs space-y-1.5">
-        <div class="flex items-center gap-1.5">
-          <span class="w-1.5 h-1.5 rounded-full"
-                :class="live.status === 'healthy' ? 'bg-green-400' : 'bg-red-400'"></span>
-          <span class="text-gray-400"
-                x-text="live.status === 'healthy' ? 'Healthy' : 'Error'"></span>
-        </div>
-        <div class="text-gray-500" x-text="'Queue: ' + (live.queue_depth ?? 0)"></div>
-        <div class="text-gray-500"
-             x-text="((live.requests_today ?? 0)).toLocaleString() + ' req today'"></div>
-        <div class="text-gray-500"
-             x-text="(live.active_requests ?? 0) + ' active'"></div>
-      </div>
-    </nav>
-
-    <!-- Content area -->
-    <main class="flex-1 overflow-y-auto bg-gray-950">
-
-      <!-- Toast notification -->
-      <template x-if="toast.show">
-        <div class="fixed top-4 right-4 z-50 px-4 py-3 rounded-lg shadow-lg text-sm
-                    transition-all duration-300"
-             :class="toast.type === 'success'
-                     ? 'bg-green-900 border border-green-700 text-green-200'
-                     : 'bg-red-900 border border-red-700 text-red-200'"
-             x-text="toast.message">
+          <button class="btn-ghost magnetic" @click="discardChanges()">Discard</button>
         </div>
       </template>
 
-      <!-- ── Providers Panel ── -->
-      <div x-show="panel === 'providers'" class="p-6 max-w-4xl space-y-4">
-        <div>
-          <h1 class="text-xl font-semibold text-white">API Providers</h1>
-          <p class="text-gray-500 text-sm mt-1">
-            Add API keys for free-tier providers. CLASP routes across them to avoid rate limits.
-          </p>
+    </header><!-- /header -->
+
+    <!-- ── App body ─────────────────────────────────────────────── -->
+    <div class="app-body">
+
+      <!-- ── Sidebar nav ──────────────────────────────────────── -->
+      <nav class="sidebar" role="navigation" aria-label="Main navigation">
+        <div class="sidebar-top">
+          <template x-for="item in nav" :key="item.id">
+            <button class="nav-item"
+                    :class="{ active: panel === item.id }"
+                    @click="panel = item.id"
+                    :aria-current="panel === item.id ? 'page' : undefined"
+                    :aria-label="item.label">
+              <span class="nav-icon-wrap" x-html="navIcons[item.id]" aria-hidden="true"></span>
+              <span class="nav-label" x-text="item.label"></span>
+              <span class="nav-tooltip" x-text="item.label" aria-hidden="true"></span>
+            </button>
+          </template>
         </div>
 
-        <template x-for="(prov, name) in config.providers" :key="name">
-          <div class="bg-gray-900 border border-gray-800 rounded-xl overflow-hidden">
-            <!-- Card header -->
-            <div class="flex items-center gap-3 px-5 py-4 cursor-pointer"
-                 @click="prov._open = !prov._open">
-              <div class="flex-1">
-                <div class="flex items-center gap-2">
-                  <span class="font-medium text-white"
-                        x-text="catalog[name]?.display_name ?? name"></span>
-                  <!-- Live status badge -->
-                  <span class="text-xs px-2 py-0.5 rounded-full font-mono"
-                        :class="providerStatusClass(name)"
+        <!-- Sidebar mini stats -->
+        <div class="sidebar-stats" aria-label="Live stats overview">
+          <!-- Status -->
+          <div class="stat-mini-row">
+            <span class="stat-mini-dot" :class="live.status !== 'healthy' ? 'off' : ''"></span>
+            <span class="stat-mini-label" x-text="live.status === 'healthy' ? 'Healthy' : 'Error'"></span>
+          </div>
+          <!-- Queue -->
+          <div class="stat-mini-row">
+            <span class="stat-mini-label">Queue</span>
+            <div class="stat-mini-track">
+              <div class="stat-mini-fill"
+                   :style="'width:' + Math.min(100, (live.queue_depth ?? 0) * 10) + '%'"></div>
+            </div>
+            <span class="stat-mini-val text-mono" x-text="live.queue_depth ?? 0"></span>
+          </div>
+          <!-- Requests -->
+          <div class="stat-mini-row">
+            <span class="stat-mini-label">Req today</span>
+            <div class="stat-mini-track">
+              <div class="stat-mini-fill" style="width:60%"></div>
+            </div>
+            <span class="stat-mini-val text-mono" x-text="(live.requests_today ?? 0).toLocaleString()"></span>
+          </div>
+          <!-- Active -->
+          <div class="stat-mini-row">
+            <span class="stat-mini-label">Active</span>
+            <div class="stat-mini-track">
+              <div class="stat-mini-fill"
+                   :style="'width:' + Math.min(100, (live.active_requests ?? 0) * 20) + '%'"></div>
+            </div>
+            <span class="stat-mini-val text-mono" x-text="live.active_requests ?? 0"></span>
+          </div>
+        </div>
+      </nav><!-- /sidebar -->
+
+      <!-- ── Main content ──────────────────────────────────────── -->
+      <main class="main-content" id="main-content" role="main">
+
+        <!-- Toast notification -->
+        <template x-if="toast.show">
+          <div class="toast" :class="toast.type === 'error' ? 'error' : ''"
+               role="alert" aria-live="assertive" x-text="toast.message">
+          </div>
+        </template>
+
+        <!-- ══════════════════════════════════════════════════════
+             PROVIDERS PANEL
+             ══════════════════════════════════════════════════════ -->
+        <div x-show="panel === 'providers'" class="panel panel-medium">
+          <div class="panel-heading">
+            <h1 class="panel-title">API Providers</h1>
+            <p class="panel-sub">Add keys for free-tier providers. CLASP rotates across them to absorb rate limits.</p>
+          </div>
+
+          <div class="space-y-4" style="margin-top:20px;">
+            <template x-for="(prov, name) in config.providers" :key="name">
+              <div class="glass provider-card tilt-card"
+                   :class="{
+                     'status-healthy': providerStatusText(name) === 'HEALTHY',
+                     'status-warning': providerStatusText(name) === 'SOFT_LIMIT',
+                     'status-cooling': providerStatusText(name) === 'COOLING_DOWN',
+                     'status-error':   providerStatusText(name) === 'CIRCUIT_OPEN',
+                     'status-off':     providerStatusText(name) === 'OFF' || providerStatusText(name) === 'UNKNOWN'
+                   }">
+
+                <!-- Card header (click to expand) -->
+                <div class="provider-header" @click="prov._open = !prov._open">
+                  <div style="flex:1;">
+                    <div class="flex items-center gap-3">
+                      <span class="provider-name" x-text="catalog[name]?.display_name ?? name"></span>
+                      <span class="badge"
+                            :class="{
+                              'badge-healthy': providerStatusText(name) === 'HEALTHY',
+                              'badge-warning': providerStatusText(name) === 'SOFT_LIMIT',
+                              'badge-cooling': providerStatusText(name) === 'COOLING_DOWN',
+                              'badge-error':   providerStatusText(name) === 'CIRCUIT_OPEN',
+                              'badge-off':     providerStatusText(name) === 'OFF' || providerStatusText(name) === 'UNKNOWN'
+                            }"
+                            x-text="providerStatusText(name)">
+                      </span>
+                    </div>
+                    <div class="provider-note" x-text="catalog[name]?.free_tier_note"></div>
+                  </div>
+
+                  <!-- Enable toggle -->
+                  <label class="toggle-wrap" @click.stop>
+                    <span class="toggle">
+                      <input type="checkbox" x-model="prov.enabled" @change="markDirty()"
+                             :aria-label="'Enable ' + (catalog[name]?.display_name ?? name)">
+                      <span class="toggle-track"></span>
+                    </span>
+                    <span class="toggle-label" x-text="prov.enabled ? 'Enabled' : 'Disabled'"></span>
+                  </label>
+
+                  <!-- Chevron -->
+                  <svg class="chevron" :class="{ open: prov._open }"
+                       width="16" height="16" viewBox="0 0 24 24" fill="none"
+                       stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
+                       aria-hidden="true">
+                    <path d="M6 9l6 6 6-6"/>
+                  </svg>
+                </div><!-- /provider-header -->
+
+                <!-- Card body (collapsible) -->
+                <div x-show="prov._open" x-collapse class="provider-body">
+
+                  <!-- API Keys -->
+                  <div>
+                    <div class="flex items-center justify-between" style="margin-bottom:10px;">
+                      <label class="field-label" style="margin:0;">API Keys</label>
+                      <button class="btn-add-key" @click="addKey(name)"
+                              :aria-label="'Add API key for ' + (catalog[name]?.display_name ?? name)">
+                        + Add key
+                      </button>
+                    </div>
+
+                    <div class="space-y-3">
+                      <template x-for="(key, idx) in prov.keys" :key="idx">
+                        <div class="key-row">
+                          <div class="key-input-wrap">
+                            <input class="input-glass mono"
+                                   :type="key._reveal ? 'text' : 'password'"
+                                   x-model="key.value"
+                                   @input="markDirty()"
+                                   :placeholder="'Paste ' + (catalog[name]?.display_name ?? name) + ' API key'"
+                                   style="padding-right:38px;"
+                                   :aria-label="'API key ' + (idx + 1) + ' for ' + (catalog[name]?.display_name ?? name)">
+                            <button class="key-reveal-btn" @click="key._reveal = !key._reveal"
+                                    :aria-label="key._reveal ? 'Hide key' : 'Reveal key'">
+                              <template x-if="!key._reveal">
+                                <!-- Eye open -->
+                                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+                              </template>
+                              <template x-if="key._reveal">
+                                <!-- Eye off -->
+                                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94"/><path d="M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19"/><line x1="1" y1="1" x2="23" y2="23"/></svg>
+                              </template>
+                            </button>
+                          </div>
+
+                          <button class="btn-test"
+                                  @click="testKey(name, key.value, idx)"
+                                  :disabled="!key.value || key._testing"
+                                  :aria-label="'Test key ' + (idx + 1)">
+                            <span x-show="!key._testing">Test</span>
+                            <span x-show="key._testing">…</span>
+                          </button>
+
+                          <div class="key-test-result"
+                               :class="key._testResult ? (key._testResult.ok ? 'ok' : 'err') : ''"
+                               x-text="key._testResult
+                                 ? (key._testResult.ok
+                                     ? '✓ ' + key._testResult.latency_ms + 'ms'
+                                     : '✗ ' + (key._testResult.error?.slice(0,12) ?? 'err'))
+                                 : ''"
+                               :aria-live="'polite'">
+                          </div>
+
+                          <button class="btn-remove-key" @click="removeKey(name, idx)"
+                                  :aria-label="'Remove key ' + (idx + 1)">
+                            ×
+                          </button>
+                        </div>
+                      </template>
+                    </div>
+                  </div><!-- /keys -->
+
+                  <!-- Limit overrides -->
+                  <details>
+                    <summary>
+                      Override rate limits
+                      <span class="text-dim text-xs" style="margin-left:4px;"
+                            x-text="'(catalog default: ' + (catalog[name]?.rpm_limit ?? '—') + ' RPM)'">
+                      </span>
+                    </summary>
+                    <div class="grid-2" style="margin-top:12px;">
+                      <div>
+                        <label class="field-label">RPM Limit</label>
+                        <input class="input-glass" type="number"
+                               x-model="prov.rpm_limit"
+                               @input="markDirty()"
+                               :placeholder="catalog[name]?.rpm_limit"
+                               aria-label="RPM limit override">
+                      </div>
+                      <div>
+                        <label class="field-label">Soft Threshold (%)</label>
+                        <input class="input-glass" type="number" min="50" max="95"
+                               x-model="prov.soft_threshold_pct"
+                               @input="markDirty()"
+                               placeholder="80"
+                               aria-label="Soft threshold percentage">
+                      </div>
+                    </div>
+                  </details>
+
+                  <!-- Usage summary -->
+                  <div class="provider-usage" aria-label="Today's usage">
+                    <span class="provider-usage-chip"
+                          x-text="(live.providers?.[name]?.requests_today ?? 0).toLocaleString() + ' req today'">
+                    </span>
+                    <span class="provider-usage-chip"
+                          x-text="((live.providers?.[name]?.tokens_today ?? 0) / 1000).toFixed(0) + 'k tokens'">
+                    </span>
+                    <span class="provider-usage-chip"
+                          x-text="(live.providers?.[name]?.errors_today ?? 0) + ' errors'">
+                    </span>
+                  </div>
+
+                </div><!-- /provider-body -->
+              </div><!-- /provider-card -->
+            </template>
+          </div>
+
+        </div><!-- /providers panel -->
+
+
+        <!-- ══════════════════════════════════════════════════════
+             MODELS PANEL
+             ══════════════════════════════════════════════════════ -->
+        <div x-show="panel === 'models'" class="panel panel-medium">
+          <div class="panel-heading">
+            <h1 class="panel-title">Model Overrides</h1>
+            <p class="panel-sub">Map Claude model families to actual provider endpoints.</p>
+          </div>
+
+          <!-- Tier rows -->
+          <div class="panel-section">
+            <h2 class="section-title">Model Tiers</h2>
+            <div class="glass tier-table">
+              <template x-for="tier in modelTiers" :key="tier.key">
+                <div class="tier-row">
+                  <div class="tier-label-col">
+                    <div class="model-pill" x-text="tier.label"></div>
+                    <div class="tier-hint" x-text="tier.hint"></div>
+                  </div>
+
+                  <div class="tier-arrow" aria-hidden="true">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg>
+                  </div>
+
+                  <select class="input-glass"
+                          style="width:160px;flex-shrink:0;"
+                          x-model="config.routing.models[tier.key + '_provider']"
+                          @change="markDirty()"
+                          :aria-label="tier.label + ' provider'">
+                    <template x-for="p in enabledProviders()" :key="p">
+                      <option :value="p" x-text="catalog[p]?.display_name ?? p"></option>
+                    </template>
+                  </select>
+
+                  <input class="input-glass mono" style="flex:1;"
+                         type="text"
+                         x-model="config.routing.models[tier.key]"
+                         @input="markDirty()"
+                         placeholder="provider/model-slug"
+                         :aria-label="tier.label + ' model slug'">
+                </div>
+              </template>
+            </div>
+          </div>
+
+          <!-- By-type overrides -->
+          <div class="panel-section">
+            <h2 class="section-title">Override by Request Type</h2>
+            <div class="glass">
+              <template x-for="rt in requestTypes" :key="rt.key">
+                <div class="type-row">
+                  <div class="type-label-col">
+                    <div class="type-name" x-text="rt.label"></div>
+                    <div class="type-hint" x-text="rt.hint"></div>
+                  </div>
+                  <div class="tier-arrow" aria-hidden="true">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg>
+                  </div>
+                  <input class="input-glass mono" style="flex:1;"
+                         type="text"
+                         x-model="config.routing.by_type[rt.key]"
+                         @input="markDirty()"
+                         placeholder="provider/model-slug  (blank = use chain)"
+                         :aria-label="rt.label + ' model override'">
+                </div>
+              </template>
+            </div>
+          </div>
+
+          <div style="margin-top:18px;">
+            <button class="btn-ghost" @click="resetModelDefaults()">Reset to defaults</button>
+          </div>
+
+        </div><!-- /models panel -->
+
+
+        <!-- ══════════════════════════════════════════════════════
+             DASHBOARD PANEL
+             ══════════════════════════════════════════════════════ -->
+        <div x-show="panel === 'dashboard'" class="panel">
+
+          <!-- System status bar -->
+          <div class="glass system-bar" style="margin-bottom:20px;">
+            <div class="system-bar-item">
+              <div class="status-ring" :class="live.status !== 'healthy' ? 'error' : ''" aria-hidden="true">
+                <span class="status-ring-dot"></span>
+                <span class="status-ring-pulse"></span>
+              </div>
+              <span class="system-bar-val"
+                    :class="live.status === 'healthy' ? 'text-accent' : 'text-danger'"
+                    x-text="live.status === 'healthy' ? 'HEALTHY' : 'ERROR'">
+              </span>
+            </div>
+            <span class="system-bar-sep" aria-hidden="true"></span>
+            <div class="system-bar-item">
+              <span class="system-bar-key">Uptime</span>
+              <span class="system-bar-val" x-text="formatUptime(live.uptime_seconds)"></span>
+            </div>
+            <span class="system-bar-sep" aria-hidden="true"></span>
+            <div class="system-bar-item">
+              <span class="system-bar-key">Active</span>
+              <span class="system-bar-val" x-text="(live.active_requests ?? 0) + ' req'"></span>
+            </div>
+            <span class="system-bar-sep" aria-hidden="true"></span>
+            <div class="system-bar-item">
+              <span class="system-bar-key">Queue</span>
+              <span class="system-bar-val" x-text="live.queue_depth ?? 0"></span>
+            </div>
+            <div class="system-bar-spacer"></div>
+            <div class="system-bar-item">
+              <span class="system-bar-key text-dim text-xs">P50 latency across providers</span>
+            </div>
+          </div>
+
+          <!-- KPI stat cards -->
+          <div class="grid-4" style="margin-bottom:20px;">
+
+            <div class="glass stat-card glass-premium tilt-card" id="stat-requests">
+              <div class="stat-num" id="stat-val-requests"
+                   x-text="(live.requests_today ?? 0).toLocaleString()"></div>
+              <div class="stat-label">Requests today</div>
+              <div class="stat-sparkline" x-html="renderSparkline(sparkData.requests)"></div>
+            </div>
+
+            <div class="glass stat-card tilt-card" id="stat-tokens">
+              <div class="stat-num">
+                <span id="stat-val-tokens"
+                      x-text="((live.tokens_today ?? 0) / 1000).toFixed(0)"></span>
+                <span class="stat-unit">k</span>
+              </div>
+              <div class="stat-label">Tokens used</div>
+              <div class="stat-sparkline" x-html="renderSparkline(sparkData.tokens)"></div>
+            </div>
+
+            <div class="glass stat-card tilt-card" id="stat-absorbed">
+              <div class="stat-num hero" id="stat-val-429"
+                   x-text="live.absorbed_429s_today ?? 0"></div>
+              <div class="stat-label">429s absorbed</div>
+            </div>
+
+            <div class="glass stat-card tilt-card" id="stat-cache">
+              <div class="stat-num" style="color:var(--clr-info);" id="stat-val-cache"
+                   x-text="live.cache_hits_today ?? 0"></div>
+              <div class="stat-label">Cache hits</div>
+            </div>
+
+          </div><!-- /kpi grid -->
+
+          <!-- Provider cards -->
+          <div class="grid-auto-3">
+            <template x-for="(pdata, name) in (live.providers ?? {})" :key="name">
+              <div class="glass provider-card tilt-card"
+                   :class="{
+                     'status-healthy': providerStatusText(name) === 'HEALTHY',
+                     'status-warning': providerStatusText(name) === 'SOFT_LIMIT',
+                     'status-cooling': providerStatusText(name) === 'COOLING_DOWN',
+                     'status-error':   providerStatusText(name) === 'CIRCUIT_OPEN',
+                     'status-off':     providerStatusText(name) === 'OFF' || providerStatusText(name) === 'UNKNOWN'
+                   }">
+                <div class="provider-header" style="cursor:default;">
+                  <div style="flex:1;">
+                    <span class="provider-name" x-text="catalog[name]?.display_name ?? name"></span>
+                  </div>
+                  <span class="badge"
+                        :class="{
+                          'badge-healthy': providerStatusText(name) === 'HEALTHY',
+                          'badge-warning': providerStatusText(name) === 'SOFT_LIMIT',
+                          'badge-cooling': providerStatusText(name) === 'COOLING_DOWN',
+                          'badge-error':   providerStatusText(name) === 'CIRCUIT_OPEN',
+                          'badge-off':     providerStatusText(name) === 'OFF' || providerStatusText(name) === 'UNKNOWN'
+                        }"
                         x-text="providerStatusText(name)">
                   </span>
                 </div>
-                <div class="text-xs text-gray-500 mt-0.5"
-                     x-text="catalog[name]?.free_tier_note"></div>
-              </div>
-              <div class="flex items-center gap-2">
-                <label class="flex items-center gap-2 cursor-pointer" @click.stop>
-                  <input type="checkbox" x-model="prov.enabled" @change="markDirty()"
-                         class="w-4 h-4 rounded accent-green-500">
-                  <span class="text-sm text-gray-400"
-                        x-text="prov.enabled ? 'Enabled' : 'Disabled'"></span>
-                </label>
-                <span class="text-gray-600 text-lg"
-                      x-text="prov._open ? '▲' : '▼'"></span>
-              </div>
-            </div>
 
-            <!-- Card body (collapsible) -->
-            <div x-show="prov._open" x-collapse class="border-t border-gray-800 px-5 py-4 space-y-4">
-
-              <!-- API Keys section -->
-              <div>
-                <div class="flex items-center justify-between mb-2">
-                  <label class="text-sm font-medium text-gray-300">API Keys</label>
-                  <button @click="addKey(name)"
-                          class="text-xs text-green-400 hover:text-green-300 transition-colors">
-                    + Add key
-                  </button>
-                </div>
-                <div class="space-y-2">
-                  <template x-for="(key, idx) in prov.keys" :key="idx">
-                    <div class="flex items-center gap-2">
-                      <div class="relative flex-1">
-                        <input :type="key._reveal ? 'text' : 'password'"
-                               x-model="key.value"
-                               @input="markDirty()"
-                               :placeholder="'Paste ' + (catalog[name]?.display_name ?? name) + ' API key'"
-                               class="w-full bg-gray-800 border border-gray-700 rounded-lg
-                                      px-3 py-2 pr-10 text-sm font-mono text-gray-200
-                                      focus:outline-none focus:border-green-500
-                                      placeholder-gray-600">
-                        <button @click="key._reveal = !key._reveal"
-                                class="absolute right-2 top-1/2 -translate-y-1/2
-                                       text-gray-500 hover:text-gray-300 text-sm">
-                          <span x-text="key._reveal ? '🙈' : '👁'"></span>
-                        </button>
+                <div class="provider-body" style="border-top:1px solid var(--border);">
+                  <!-- Per-key RPM bars -->
+                  <template x-for="key in (pdata.keys ?? [])" :key="key.index">
+                    <div class="bar-row">
+                      <div class="bar-meta">
+                        <span class="bar-key-label"
+                              x-text="'Key ' + (key.index + 1) + ': ' + key.redacted"></span>
+                        <span class="bar-usage-label"
+                              x-show="key.status !== 'COOLING_DOWN'"
+                              x-text="key.rpm_used + '/' + key.rpm_limit + ' rpm · ' + Math.round(key.rpm_used / key.rpm_limit * 100) + '%'">
+                        </span>
+                        <span class="bar-cooling-label"
+                              x-show="key.status === 'COOLING_DOWN'"
+                              x-text="'♻ ' + Math.ceil(key.recovery_in) + 's'">
+                        </span>
                       </div>
-                      <button @click="testKey(name, key.value, idx)"
-                              :disabled="!key.value || key._testing"
-                              class="px-2.5 py-2 text-xs bg-gray-800 hover:bg-gray-700
-                                     border border-gray-700 rounded-lg disabled:opacity-40
-                                     transition-colors whitespace-nowrap">
-                        <span x-show="!key._testing">Test</span>
-                        <span x-show="key._testing">…</span>
-                      </button>
-                      <div class="text-xs w-20 text-right"
-                           :class="key._testResult?.ok ? 'text-green-400' : 'text-red-400'"
-                           x-text="key._testResult ? (key._testResult.ok ? '✓ ' + key._testResult.latency_ms + 'ms' : '✗ ' + (key._testResult.error?.slice(0,12))) : ''">
+                      <div class="rpm-track">
+                        <div class="rpm-fill"
+                             :data-level="key.rpm_used / key.rpm_limit > 0.8 ? 'danger'
+                                        : key.rpm_used / key.rpm_limit > 0.5 ? 'warn' : 'ok'"
+                             :style="'width:' + Math.min(100, key.rpm_used / key.rpm_limit * 100) + '%'"
+                             role="progressbar"
+                             :aria-valuenow="key.rpm_used"
+                             :aria-valuemax="key.rpm_limit"
+                             :aria-label="'Key ' + (key.index + 1) + ' RPM usage'">
+                        </div>
                       </div>
-                      <button @click="removeKey(name, idx)"
-                              class="text-gray-600 hover:text-red-400 transition-colors text-lg leading-none">
-                        ×
-                      </button>
                     </div>
                   </template>
-                </div>
-              </div>
 
-              <!-- Limit overrides (collapsible) -->
-              <details class="text-sm">
-                <summary class="text-gray-500 cursor-pointer hover:text-gray-300 select-none">
-                  Override limits (catalog default: <span x-text="catalog[name]?.rpm_limit"></span> RPM)
-                </summary>
-                <div class="mt-3 grid grid-cols-2 gap-3">
-                  <div>
-                    <label class="block text-xs text-gray-500 mb-1">RPM Limit</label>
-                    <input type="number" x-model="prov.rpm_limit" @input="markDirty()"
-                           :placeholder="catalog[name]?.rpm_limit"
-                           class="w-full bg-gray-800 border border-gray-700 rounded px-2 py-1.5
-                                  text-sm text-gray-200 focus:outline-none focus:border-green-500">
+                  <!-- Daily token usage bar (if limit set) -->
+                  <template x-if="pdata.daily_token_limit">
+                    <div class="bar-row">
+                      <div class="bar-meta">
+                        <span class="bar-key-label">Tokens today</span>
+                        <span class="bar-usage-label"
+                              x-text="(pdata.tokens_today/1000).toFixed(0) + 'k / ' + (pdata.daily_token_limit/1000).toFixed(0) + 'k'">
+                        </span>
+                      </div>
+                      <div class="rpm-track">
+                        <div class="token-fill"
+                             :style="'width:' + Math.min(100, pdata.tokens_today / pdata.daily_token_limit * 100) + '%'"
+                             role="progressbar"
+                             :aria-valuenow="pdata.tokens_today"
+                             :aria-valuemax="pdata.daily_token_limit"
+                             aria-label="Daily token usage">
+                        </div>
+                      </div>
+                    </div>
+                  </template>
+
+                  <div class="text-dim text-xs text-mono"
+                       x-text="'P50: ' + (pdata.p50_latency_ms ?? '—') + 'ms'">
                   </div>
-                  <div>
-                    <label class="block text-xs text-gray-500 mb-1">Soft Threshold (%)</label>
-                    <input type="number" min="50" max="95" x-model="prov.soft_threshold_pct"
-                           @input="markDirty()" placeholder="80"
-                           class="w-full bg-gray-800 border border-gray-700 rounded px-2 py-1.5
-                                  text-sm text-gray-200 focus:outline-none focus:border-green-500">
-                  </div>
                 </div>
-              </details>
-
-              <!-- Today's usage (from live data) -->
-              <div class="text-xs text-gray-600 flex gap-4">
-                <span x-text="(live.providers?.[name]?.requests_today ?? 0).toLocaleString() + ' req today'"></span>
-                <span x-text="((live.providers?.[name]?.tokens_today ?? 0) / 1000).toFixed(0) + 'k tokens'"></span>
-                <span x-text="(live.providers?.[name]?.errors_today ?? 0) + ' errors'"></span>
-              </div>
-            </div>
-          </div>
-        </template>
-      </div><!-- /providers panel -->
-
-      <!-- ── Models Panel ── -->
-      <div x-show="panel === 'models'" class="p-6 max-w-3xl space-y-6">
-        <div>
-          <h1 class="text-xl font-semibold text-white">Model Overrides</h1>
-          <p class="text-gray-500 text-sm mt-1">
-            Map Claude model families to actual provider models.
-          </p>
-        </div>
-
-        <!-- Tier rows -->
-        <div class="bg-gray-900 border border-gray-800 rounded-xl overflow-hidden divide-y divide-gray-800">
-          <template x-for="tier in modelTiers" :key="tier.key">
-            <div class="flex items-center gap-4 px-5 py-4">
-              <div class="w-40 shrink-0">
-                <div class="text-sm font-mono text-gray-200" x-text="tier.label"></div>
-                <div class="text-xs text-gray-600 mt-0.5" x-text="tier.hint"></div>
-              </div>
-              <span class="text-gray-600">→</span>
-              <!-- Provider dropdown -->
-              <select x-model="config.routing.models[tier.key + '_provider']"
-                      @change="markDirty()"
-                      class="bg-gray-800 border border-gray-700 rounded-lg px-2 py-1.5
-                             text-sm text-gray-200 focus:outline-none focus:border-green-500">
-                <template x-for="p in enabledProviders()" :key="p">
-                  <option :value="p" x-text="catalog[p]?.display_name ?? p"></option>
-                </template>
-              </select>
-              <!-- Model slug input -->
-              <input type="text"
-                     x-model="config.routing.models[tier.key]"
-                     @input="markDirty()"
-                     placeholder="provider/model-slug"
-                     class="flex-1 bg-gray-800 border border-gray-700 rounded-lg px-3 py-1.5
-                            text-sm font-mono text-gray-200 focus:outline-none focus:border-green-500">
-            </div>
-          </template>
-        </div>
-
-        <!-- By-type overrides -->
-        <div>
-          <h2 class="text-base font-medium text-white mb-3">Override by Request Type</h2>
-          <div class="bg-gray-900 border border-gray-800 rounded-xl overflow-hidden divide-y divide-gray-800">
-            <template x-for="rt in requestTypes" :key="rt.key">
-              <div class="flex items-center gap-4 px-5 py-3">
-                <div class="w-48 shrink-0">
-                  <div class="text-sm text-gray-200" x-text="rt.label"></div>
-                  <div class="text-xs text-gray-600" x-text="rt.hint"></div>
-                </div>
-                <span class="text-gray-600">→</span>
-                <input type="text"
-                       x-model="config.routing.by_type[rt.key]"
-                       @input="markDirty()"
-                       placeholder="provider/model-slug  (blank = use chain)"
-                       class="flex-1 bg-gray-800 border border-gray-700 rounded-lg px-3 py-1.5
-                              text-sm font-mono text-gray-200 focus:outline-none focus:border-green-500">
               </div>
             </template>
+          </div><!-- /provider cards grid -->
+
+        </div><!-- /dashboard panel -->
+
+
+        <!-- ══════════════════════════════════════════════════════
+             ROUTING PANEL
+             ══════════════════════════════════════════════════════ -->
+        <div x-show="panel === 'routing'" class="panel panel-narrow">
+          <div class="panel-heading">
+            <h1 class="panel-title">Provider Routing</h1>
+            <p class="panel-sub">CLASP tries providers top-to-bottom. Cooling or unhealthy providers are automatically skipped.</p>
           </div>
-        </div>
 
-        <div class="flex gap-3">
-          <button @click="resetModelDefaults()"
-                  class="px-4 py-2 text-sm text-gray-400 hover:text-white border border-gray-700
-                         hover:border-gray-600 rounded-lg transition-colors">
-            Reset to defaults
-          </button>
-        </div>
-      </div><!-- /models panel -->
-
-      <!-- ── Dashboard Panel ── -->
-      <div x-show="panel === 'dashboard'" class="p-6 space-y-4">
-        <!-- System status bar -->
-        <div class="flex items-center gap-4 bg-gray-900 rounded-xl px-5 py-3 border border-gray-800">
-          <div class="flex items-center gap-2">
-            <span class="w-2.5 h-2.5 rounded-full"
-                  :class="live.status === 'healthy' ? 'bg-green-400' : 'bg-red-400'"></span>
-            <span class="font-medium"
-                  x-text="live.status === 'healthy' ? 'HEALTHY' : 'ERROR'"></span>
-          </div>
-          <span class="text-gray-500 text-sm" x-text="'Uptime: ' + formatUptime(live.uptime_seconds)"></span>
-          <span class="text-gray-500 text-sm" x-text="(live.active_requests ?? 0) + ' active request(s)'"></span>
-          <span class="ml-auto text-gray-500 text-sm">
-            Queue: <span class="text-white font-mono" x-text="live.queue_depth ?? 0"></span>
-          </span>
-        </div>
-
-        <!-- Provider cards grid -->
-        <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
-          <template x-for="(pdata, name) in (live.providers ?? {})" :key="name">
-            <div class="bg-gray-900 border border-gray-800 rounded-xl p-5 space-y-3">
-              <div class="flex items-center justify-between">
-                <span class="font-medium text-white"
-                      x-text="catalog[name]?.display_name ?? name"></span>
-                <span class="text-xs px-2 py-0.5 rounded-full"
-                      :class="providerStatusClass(name)"
-                      x-text="providerStatusText(name)"></span>
-              </div>
-
-              <!-- Per-key RPM bars -->
-              <template x-for="key in (pdata.keys ?? [])" :key="key.index">
-                <div class="space-y-1">
-                  <div class="flex justify-between text-xs text-gray-500">
-                    <span x-text="'Key ' + (key.index+1) + ': ' + key.redacted"></span>
-                    <span x-show="key.status !== 'COOLING_DOWN'"
-                          x-text="key.rpm_used + '/' + key.rpm_limit + ' rpm'"></span>
-                    <span x-show="key.status === 'COOLING_DOWN'"
-                          class="text-orange-400"
-                          x-text="'♻ ' + Math.ceil(key.recovery_in) + 's'"></span>
-                  </div>
-                  <div class="h-1.5 bg-gray-800 rounded-full overflow-hidden">
-                    <div class="h-full rounded-full transition-all duration-500"
-                         :class="key.rpm_used / key.rpm_limit > 0.8 ? 'bg-red-500' :
-                                 key.rpm_used / key.rpm_limit > 0.5 ? 'bg-yellow-500' :
-                                 'bg-green-500'"
-                         :style="'width: ' + Math.min(100, (key.rpm_used / key.rpm_limit * 100)) + '%'">
-                    </div>
-                  </div>
+          <!-- Chain list -->
+          <div class="panel-section">
+            <h2 class="section-title">Failover Chain</h2>
+            <div class="glass">
+              <template x-for="(name, idx) in config.provider_chain" :key="name">
+                <div class="chain-row">
+                  <!-- Grip icon -->
+                  <span class="chain-grip" aria-hidden="true">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><circle cx="9" cy="5" r="1.5"/><circle cx="15" cy="5" r="1.5"/><circle cx="9" cy="12" r="1.5"/><circle cx="15" cy="12" r="1.5"/><circle cx="9" cy="19" r="1.5"/><circle cx="15" cy="19" r="1.5"/></svg>
+                  </span>
+                  <span class="chain-idx text-dim text-mono" x-text="(idx + 1) + '.'"></span>
+                  <span class="chain-name" x-text="catalog[name]?.display_name ?? name"></span>
+                  <span class="badge"
+                        :class="{
+                          'badge-healthy': providerStatusText(name) === 'HEALTHY',
+                          'badge-warning': providerStatusText(name) === 'SOFT_LIMIT',
+                          'badge-cooling': providerStatusText(name) === 'COOLING_DOWN',
+                          'badge-error':   providerStatusText(name) === 'CIRCUIT_OPEN',
+                          'badge-off':     providerStatusText(name) === 'OFF' || providerStatusText(name) === 'UNKNOWN'
+                        }"
+                        x-text="providerStatusText(name)">
+                  </span>
+                  <button class="btn-chain-remove" @click="removeFromChain(idx)"
+                          :aria-label="'Remove ' + (catalog[name]?.display_name ?? name) + ' from chain'">
+                    Remove
+                  </button>
                 </div>
               </template>
+            </div>
+          </div>
 
-              <!-- Daily token usage (if limit exists) -->
-              <template x-if="pdata.daily_token_limit">
-                <div class="space-y-1">
-                  <div class="flex justify-between text-xs text-gray-500">
-                    <span>Tokens today</span>
-                    <span x-text="(pdata.tokens_today/1000).toFixed(0) + 'k / '
-                                  + (pdata.daily_token_limit/1000).toFixed(0) + 'k'"></span>
+          <!-- Strategy selector -->
+          <div class="panel-section">
+            <h2 class="section-title">Routing Strategy</h2>
+            <div class="space-y-3">
+              <template x-for="strat in strategies" :key="strat.key">
+                <label class="glass strategy-card flex items-center gap-4"
+                       :class="{ selected: config.routing?.strategy === strat.key }">
+                  <input type="radio" name="strategy"
+                         :value="strat.key"
+                         x-model="config.routing.strategy"
+                         @change="markDirty()"
+                         :aria-label="strat.label">
+                  <div style="flex:1;">
+                    <div class="strategy-label" x-text="strat.label"></div>
+                    <div class="strategy-desc" x-text="strat.description"></div>
                   </div>
-                  <div class="h-1.5 bg-gray-800 rounded-full overflow-hidden">
-                    <div class="h-full bg-blue-500 rounded-full transition-all duration-500"
-                         :style="'width: ' + Math.min(100, pdata.tokens_today / pdata.daily_token_limit * 100) + '%'">
-                    </div>
-                  </div>
-                </div>
+                  <!-- Selected checkmark -->
+                  <span class="strategy-selected-mark"
+                        x-show="config.routing?.strategy === strat.key"
+                        aria-hidden="true">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+                  </span>
+                </label>
               </template>
-
-              <div class="text-xs text-gray-600"
-                   x-text="'P50: ' + (pdata.p50_latency_ms ?? '—') + 'ms'">
-              </div>
             </div>
-          </template>
-        </div>
-
-        <!-- Usage summary row -->
-        <div class="grid grid-cols-2 md:grid-cols-4 gap-4">
-          <div class="bg-gray-900 border border-gray-800 rounded-xl p-4">
-            <div class="text-2xl font-bold text-white font-mono"
-                 x-text="(live.requests_today ?? 0).toLocaleString()"></div>
-            <div class="text-xs text-gray-500 mt-1">Requests today</div>
           </div>
-          <div class="bg-gray-900 border border-gray-800 rounded-xl p-4">
-            <div class="text-2xl font-bold text-white font-mono"
-                 x-text="((live.tokens_today ?? 0) / 1000).toFixed(0) + 'k'"></div>
-            <div class="text-xs text-gray-500 mt-1">Tokens used</div>
-          </div>
-          <div class="bg-gray-900 border border-gray-800 rounded-xl p-4">
-            <div class="text-2xl font-bold text-green-400 font-mono"
-                 x-text="live.absorbed_429s_today ?? 0"></div>
-            <div class="text-xs text-gray-500 mt-1">429s absorbed</div>
-          </div>
-          <div class="bg-gray-900 border border-gray-800 rounded-xl p-4">
-            <div class="text-2xl font-bold text-blue-400 font-mono"
-                 x-text="live.cache_hits_today ?? 0"></div>
-            <div class="text-xs text-gray-500 mt-1">Cache hits</div>
-          </div>
-        </div>
-      </div><!-- /dashboard panel -->
 
-      <!-- ── Routing Panel ── -->
-      <div x-show="panel === 'routing'" class="p-6 max-w-2xl space-y-6">
-        <div>
-          <h1 class="text-xl font-semibold text-white">Provider Routing</h1>
-          <p class="text-gray-500 text-sm mt-1">
-            CLASP tries providers top-to-bottom. Drag to reorder.
-            Cooling or unhealthy providers are automatically skipped.
-          </p>
-        </div>
+        </div><!-- /routing panel -->
 
-        <!-- Chain list -->
-        <div class="bg-gray-900 border border-gray-800 rounded-xl overflow-hidden divide-y divide-gray-800">
-          <template x-for="(name, idx) in config.provider_chain" :key="name">
-            <div class="flex items-center gap-3 px-5 py-3">
-              <span class="text-gray-600 cursor-grab select-none text-lg">≡</span>
-              <span class="text-gray-500 font-mono text-sm w-5" x-text="idx + 1 + '.'"></span>
-              <span class="flex-1 text-sm text-white"
-                    x-text="catalog[name]?.display_name ?? name"></span>
-              <span class="text-xs px-2 py-0.5 rounded-full"
-                    :class="providerStatusClass(name)"
-                    x-text="providerStatusText(name)"></span>
-              <button @click="removeFromChain(idx)"
-                      class="text-gray-600 hover:text-red-400 text-sm transition-colors">
-                Remove
-              </button>
-            </div>
-          </template>
-        </div>
 
-        <!-- Strategy selector -->
-        <div>
-          <h2 class="text-base font-medium text-white mb-3">Routing Strategy</h2>
-          <div class="space-y-2">
-            <template x-for="strat in strategies" :key="strat.key">
-              <label class="flex items-start gap-3 cursor-pointer group">
-                <input type="radio" name="strategy"
-                       :value="strat.key" x-model="config.routing.strategy"
-                       @change="markDirty()"
-                       class="mt-0.5 accent-green-500">
-                <div>
-                  <div class="text-sm text-white" x-text="strat.label"></div>
-                  <div class="text-xs text-gray-500" x-text="strat.description"></div>
+        <!-- ══════════════════════════════════════════════════════
+             ADVANCED PANEL
+             ══════════════════════════════════════════════════════ -->
+        <div x-show="panel === 'advanced'" class="panel panel-narrow">
+          <div class="panel-heading">
+            <h1 class="panel-title">Advanced Settings</h1>
+          </div>
+
+          <!-- Server -->
+          <div class="panel-section">
+            <div class="glass">
+              <div class="adv-section">
+                <div class="adv-section-header">
+                  <div>
+                    <div class="adv-section-title">Server</div>
+                  </div>
                 </div>
-              </label>
-            </template>
-          </div>
-        </div>
-      </div><!-- /routing panel -->
-
-      <!-- ── Advanced Panel ── -->
-      <div x-show="panel === 'advanced'" class="p-6 max-w-2xl space-y-6">
-        <h1 class="text-xl font-semibold text-white">Advanced Settings</h1>
-
-        <!-- Server settings -->
-        <div class="bg-gray-900 border border-gray-800 rounded-xl p-5 space-y-4">
-          <h2 class="text-sm font-medium text-gray-400 uppercase tracking-wider">Server</h2>
-          <div class="grid grid-cols-2 gap-4">
-            <div>
-              <label class="block text-xs text-gray-500 mb-1">Proxy Port</label>
-              <input type="number" x-model="config.server.port" @input="markDirty()"
-                     class="input-field">
-            </div>
-            <div>
-              <label class="block text-xs text-gray-500 mb-1">API Key (Bearer token)</label>
-              <input type="text" x-model="config.server.api_key" @input="markDirty()"
-                     class="input-field font-mono">
-            </div>
-            <div>
-              <label class="block text-xs text-gray-500 mb-1">Request Timeout (s)</label>
-              <input type="number" x-model="config.server.request_timeout_seconds"
-                     @input="markDirty()" class="input-field">
-            </div>
-            <div>
-              <label class="block text-xs text-gray-500 mb-1">Max Queue Depth</label>
-              <input type="number" x-model="config.server.max_queue_depth"
-                     @input="markDirty()" class="input-field">
-            </div>
-            <div>
-              <label class="block text-xs text-gray-500 mb-1">Max Queue Wait (s)</label>
-              <input type="number" x-model="config.server.max_queue_wait_seconds"
-                     @input="markDirty()" class="input-field">
-            </div>
-            <div>
-              <label class="block text-xs text-gray-500 mb-1">Log Level</label>
-              <select x-model="config.server.log_level" @change="markDirty()"
-                      class="input-field">
-                <option>DEBUG</option><option>INFO</option>
-                <option>WARNING</option><option>ERROR</option>
-              </select>
-            </div>
-          </div>
-        </div>
-
-        <!-- Cache settings -->
-        <div class="bg-gray-900 border border-gray-800 rounded-xl p-5 space-y-4">
-          <div class="flex items-center justify-between">
-            <h2 class="text-sm font-medium text-gray-400 uppercase tracking-wider">Cache</h2>
-            <label class="flex items-center gap-2 cursor-pointer">
-              <input type="checkbox" x-model="config.cache.enabled" @change="markDirty()"
-                     class="accent-green-500">
-              <span class="text-sm text-gray-400">Enabled</span>
-            </label>
-          </div>
-          <div class="grid grid-cols-2 gap-4" :class="config.cache.enabled ? '' : 'opacity-50'">
-            <div>
-              <label class="block text-xs text-gray-500 mb-1">Memory Entries</label>
-              <input type="number" x-model="config.cache.memory_max_entries"
-                     @input="markDirty()" :disabled="!config.cache.enabled"
-                     class="input-field">
-            </div>
-            <div>
-              <label class="block text-xs text-gray-500 mb-1">SQLite TTL (s)</label>
-              <input type="number" x-model="config.cache.sqlite_ttl_seconds"
-                     @input="markDirty()" :disabled="!config.cache.enabled"
-                     class="input-field">
-            </div>
-          </div>
-          <button @click="clearCache()"
-                  class="text-xs text-red-400 hover:text-red-300 transition-colors">
-            Clear cache
-          </button>
-        </div>
-
-        <!-- Optimizer settings -->
-        <div class="bg-gray-900 border border-gray-800 rounded-xl p-5 space-y-4">
-          <h2 class="text-sm font-medium text-gray-400 uppercase tracking-wider">Optimizer</h2>
-          <div class="space-y-3">
-            <label class="flex items-center gap-3 cursor-pointer">
-              <input type="checkbox" x-model="config.optimizer.local_probe_answering"
-                     @change="markDirty()" class="accent-green-500">
-              <div>
-                <div class="text-sm text-gray-200">Answer trivial probes locally</div>
-                <div class="text-xs text-gray-500">Saves ~50 API calls per session</div>
+                <div class="grid-2">
+                  <div>
+                    <label class="field-label" for="adv-port">Proxy Port</label>
+                    <input id="adv-port" class="input-glass" type="number"
+                           x-model="config.server.port" @input="markDirty()">
+                  </div>
+                  <div>
+                    <label class="field-label" for="adv-apikey">API Key (Bearer token)</label>
+                    <input id="adv-apikey" class="input-glass mono" type="text"
+                           x-model="config.server.api_key" @input="markDirty()">
+                  </div>
+                  <div>
+                    <label class="field-label" for="adv-timeout">Request Timeout (s)</label>
+                    <input id="adv-timeout" class="input-glass" type="number"
+                           x-model="config.server.request_timeout_seconds" @input="markDirty()">
+                  </div>
+                  <div>
+                    <label class="field-label" for="adv-queue-depth">Max Queue Depth</label>
+                    <input id="adv-queue-depth" class="input-glass" type="number"
+                           x-model="config.server.max_queue_depth" @input="markDirty()">
+                  </div>
+                  <div>
+                    <label class="field-label" for="adv-queue-wait">Max Queue Wait (s)</label>
+                    <input id="adv-queue-wait" class="input-glass" type="number"
+                           x-model="config.server.max_queue_wait_seconds" @input="markDirty()">
+                  </div>
+                  <div>
+                    <label class="field-label" for="adv-loglevel">Log Level</label>
+                    <select id="adv-loglevel" class="input-glass"
+                            x-model="config.server.log_level" @change="markDirty()">
+                      <option>DEBUG</option>
+                      <option>INFO</option>
+                      <option>WARNING</option>
+                      <option>ERROR</option>
+                    </select>
+                  </div>
+                </div>
               </div>
-            </label>
-            <label class="flex items-center gap-3 cursor-pointer">
-              <input type="checkbox" x-model="config.optimizer.system_prompt_dedup"
-                     @change="markDirty()" class="accent-green-500">
-              <div>
-                <div class="text-sm text-gray-200">System prompt deduplication</div>
-                <div class="text-xs text-gray-500">Saves tokens on providers with prefix caching</div>
-              </div>
-            </label>
-            <label class="flex items-center gap-3 cursor-pointer">
-              <input type="checkbox" x-model="config.optimizer.context_pruning.enabled"
-                     @change="markDirty()" class="accent-green-500">
-              <div>
-                <div class="text-sm text-gray-200">Context pruning</div>
-                <div class="text-xs text-gray-500">Trim history for small-context providers</div>
-              </div>
-            </label>
+            </div>
           </div>
-          <div x-show="config.optimizer.context_pruning.enabled" class="pl-6 space-y-3">
-            <div>
-              <label class="block text-xs text-gray-500 mb-2">Pruning strategy</label>
-              <div class="flex gap-4">
-                <template x-for="s in ['keep_edges','truncate','summarize']" :key="s">
-                  <label class="flex items-center gap-1.5 cursor-pointer">
-                    <input type="radio" name="pruning" :value="s"
-                           x-model="config.optimizer.context_pruning.strategy"
-                           @change="markDirty()" class="accent-green-500">
-                    <span class="text-sm text-gray-300" x-text="s"></span>
+
+          <!-- Cache -->
+          <div class="panel-section">
+            <div class="glass">
+              <div class="adv-section">
+                <div class="adv-section-header">
+                  <div>
+                    <div class="adv-section-title">Cache</div>
+                  </div>
+                  <label class="toggle-wrap">
+                    <span class="toggle">
+                      <input type="checkbox" x-model="config.cache.enabled"
+                             @change="markDirty()" aria-label="Enable cache">
+                      <span class="toggle-track"></span>
+                    </span>
+                    <span class="toggle-label">Enabled</span>
                   </label>
-                </template>
+                </div>
+                <div class="grid-2" :class="config.cache.enabled ? '' : 'opacity-50'">
+                  <div>
+                    <label class="field-label" for="adv-cache-entries">Memory Entries</label>
+                    <input id="adv-cache-entries" class="input-glass" type="number"
+                           x-model="config.cache.memory_max_entries"
+                           @input="markDirty()" :disabled="!config.cache.enabled">
+                  </div>
+                  <div>
+                    <label class="field-label" for="adv-cache-ttl">SQLite TTL (s)</label>
+                    <input id="adv-cache-ttl" class="input-glass" type="number"
+                           x-model="config.cache.sqlite_ttl_seconds"
+                           @input="markDirty()" :disabled="!config.cache.enabled">
+                  </div>
+                </div>
+                <div style="margin-top:14px;">
+                  <button class="btn-danger" @click="clearCache()">Clear cache</button>
+                </div>
               </div>
             </div>
           </div>
-        </div>
 
-        <!-- Shared pool settings -->
-        <div class="bg-gray-900 border border-gray-800 rounded-xl p-5 space-y-4">
-          <div class="flex items-center justify-between">
-            <div>
-              <h2 class="text-sm font-medium text-gray-400 uppercase tracking-wider">Shared Pool</h2>
-              <p class="text-xs text-gray-600 mt-0.5">
-                Allow study group members to share your proxy over a VPS or ngrok.
-              </p>
+          <!-- Optimizer -->
+          <div class="panel-section">
+            <div class="glass">
+              <div class="adv-section">
+                <div class="adv-section-header">
+                  <div class="adv-section-title">Optimizer</div>
+                </div>
+
+                <label class="check-row">
+                  <label class="toggle-wrap">
+                    <span class="toggle">
+                      <input type="checkbox"
+                             x-model="config.optimizer.local_probe_answering"
+                             @change="markDirty()"
+                             aria-label="Answer trivial probes locally">
+                      <span class="toggle-track"></span>
+                    </span>
+                  </label>
+                  <div>
+                    <div class="check-text-title">Answer trivial probes locally</div>
+                    <div class="check-text-desc">Saves ~50 API calls per session</div>
+                  </div>
+                </label>
+
+                <label class="check-row">
+                  <label class="toggle-wrap">
+                    <span class="toggle">
+                      <input type="checkbox"
+                             x-model="config.optimizer.system_prompt_dedup"
+                             @change="markDirty()"
+                             aria-label="System prompt deduplication">
+                      <span class="toggle-track"></span>
+                    </span>
+                  </label>
+                  <div>
+                    <div class="check-text-title">System prompt deduplication</div>
+                    <div class="check-text-desc">Saves tokens on providers with prefix caching</div>
+                  </div>
+                </label>
+
+                <label class="check-row">
+                  <label class="toggle-wrap">
+                    <span class="toggle">
+                      <input type="checkbox"
+                             x-model="config.optimizer.context_pruning.enabled"
+                             @change="markDirty()"
+                             aria-label="Context pruning">
+                      <span class="toggle-track"></span>
+                    </span>
+                  </label>
+                  <div>
+                    <div class="check-text-title">Context pruning</div>
+                    <div class="check-text-desc">Trim history for small-context providers</div>
+                  </div>
+                </label>
+
+                <div x-show="config.optimizer.context_pruning.enabled"
+                     style="margin-top:10px;padding-left:52px;">
+                  <label class="field-label">Pruning strategy</label>
+                  <div class="radio-group">
+                    <template x-for="s in ['keep_edges','truncate','summarize']" :key="s">
+                      <label class="radio-option">
+                        <input type="radio" name="pruning" :value="s"
+                               x-model="config.optimizer.context_pruning.strategy"
+                               @change="markDirty()">
+                        <span x-text="s"></span>
+                      </label>
+                    </template>
+                  </div>
+                </div>
+              </div>
             </div>
-            <label class="flex items-center gap-2 cursor-pointer">
-              <input type="checkbox" x-model="config.shared_pool.enabled" @change="markDirty()"
-                     class="accent-green-500">
-              <span class="text-sm text-gray-400">Enable</span>
-            </label>
           </div>
-          <div x-show="config.shared_pool.enabled" class="space-y-3">
-            <div>
-              <label class="block text-xs text-gray-500 mb-1">Per-user RPM limit</label>
-              <input type="number" x-model="config.shared_pool.per_user_rpm_limit"
-                     @input="markDirty()" class="input-field w-32">
+
+          <!-- Shared Pool -->
+          <div class="panel-section">
+            <div class="glass">
+              <div class="adv-section">
+                <div class="adv-section-header">
+                  <div>
+                    <div class="adv-section-title">Shared Pool</div>
+                    <div class="adv-section-desc">
+                      Allow study group members to share your proxy over a VPS or ngrok.
+                    </div>
+                  </div>
+                  <label class="toggle-wrap">
+                    <span class="toggle">
+                      <input type="checkbox" x-model="config.shared_pool.enabled"
+                             @change="markDirty()" aria-label="Enable shared pool">
+                      <span class="toggle-track"></span>
+                    </span>
+                    <span class="toggle-label">Enable</span>
+                  </label>
+                </div>
+
+                <div x-show="config.shared_pool.enabled" class="space-y-4">
+                  <div>
+                    <label class="field-label" for="adv-pool-rpm">Per-user RPM limit</label>
+                    <input id="adv-pool-rpm" class="input-glass" type="number" style="width:120px;"
+                           x-model="config.shared_pool.per_user_rpm_limit" @input="markDirty()">
+                  </div>
+                  <div>
+                    <label class="field-label" for="adv-pool-tokens">
+                      Auth tokens <span class="text-dim">(one per line — share with your group)</span>
+                    </label>
+                    <textarea id="adv-pool-tokens"
+                              class="textarea-glass"
+                              rows="4"
+                              x-model="sharedPoolTokensText"
+                              @input="syncSharedTokens()"
+                              placeholder="token-alice&#10;token-bob&#10;token-charlie">
+                    </textarea>
+                  </div>
+                </div>
+              </div>
             </div>
-            <div>
-              <label class="block text-xs text-gray-500 mb-1">
-                Auth tokens (one per line — share these with your group)
+          </div>
+
+          <!-- Export / Import -->
+          <div class="panel-section">
+            <div class="export-row">
+              <button class="btn-ghost" @click="exportConfig()">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+                Export config.yaml
+              </button>
+              <label class="btn-ghost" style="cursor:pointer;" tabindex="0">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+                Import config.yaml
+                <input type="file" accept=".yaml,.yml" @change="importConfig($event)" class="sr-only">
               </label>
-              <textarea rows="4"
-                        x-model="sharedPoolTokensText"
-                        @input="syncSharedTokens()"
-                        placeholder="token-alice&#10;token-bob&#10;token-charlie"
-                        class="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2
-                               text-sm font-mono text-gray-200 focus:outline-none
-                               focus:border-green-500 resize-none">
-              </textarea>
             </div>
           </div>
-        </div>
 
-        <div class="flex gap-3">
-          <button @click="exportConfig()"
-                  class="px-4 py-2 text-sm text-gray-300 border border-gray-700
-                         hover:border-gray-500 rounded-lg transition-colors">
-            Export config.yaml
-          </button>
-          <label class="px-4 py-2 text-sm text-gray-300 border border-gray-700
-                        hover:border-gray-500 rounded-lg transition-colors cursor-pointer">
-            Import config.yaml
-            <input type="file" accept=".yaml,.yml" @change="importConfig($event)" class="hidden">
-          </label>
-        </div>
-      </div><!-- /advanced panel -->
+        </div><!-- /advanced panel -->
 
-      <!-- ── Logs Panel ── -->
-      <div x-show="panel === 'logs'" class="p-6 flex flex-col h-full">
-        <div class="flex items-center gap-4 mb-4">
-          <h1 class="text-xl font-semibold text-white">Live Logs</h1>
-          <div class="flex items-center gap-1.5 ml-2">
-            <span class="w-2 h-2 rounded-full bg-green-400 animate-pulse"></span>
-            <span class="text-xs text-gray-500">Live</span>
-          </div>
-          <select x-model="logLevel"
-                  class="ml-auto bg-gray-800 border border-gray-700 rounded px-2 py-1 text-sm">
-            <option value="DEBUG">DEBUG+</option>
-            <option value="INFO" selected>INFO+</option>
-            <option value="WARNING">WARNING+</option>
-            <option value="ERROR">ERROR+</option>
-          </select>
-          <button @click="logLines = []"
-                  class="px-2.5 py-1 text-xs text-gray-400 hover:text-white border border-gray-700
-                         hover:border-gray-500 rounded transition-colors">
-            Clear
-          </button>
-          <a href="/internal/logs/download"
-             class="px-2.5 py-1 text-xs text-gray-400 hover:text-white border border-gray-700
-                    hover:border-gray-500 rounded transition-colors">
-            Download
-          </a>
-        </div>
-        <div class="flex-1 bg-gray-900 border border-gray-800 rounded-xl overflow-y-auto
-                    font-mono text-xs p-4 space-y-0.5" id="log-container">
-          <template x-for="(line, i) in filteredLogs()" :key="i">
-            <div class="flex gap-3 py-0.5 hover:bg-gray-800/50 px-1 rounded">
-              <span class="text-gray-600 shrink-0" x-text="line.time"></span>
-              <span class="w-14 shrink-0 font-bold"
-                    :class="{
-                      'text-red-400': line.level === 'ERROR',
-                      'text-yellow-400': line.level === 'WARNING',
-                      'text-blue-400': line.level === 'DEBUG',
-                      'text-gray-400': line.level === 'INFO'
-                    }"
-                    x-text="line.level">
-              </span>
-              <span class="text-gray-300" x-text="line.message"></span>
-              <span class="text-gray-600 ml-auto shrink-0" x-text="line.provider ?? ''"></span>
+
+        <!-- ══════════════════════════════════════════════════════
+             LOGS PANEL
+             ══════════════════════════════════════════════════════ -->
+        <div x-show="panel === 'logs'" class="panel panel-logs">
+
+          <div class="logs-header">
+            <div class="logs-title-wrap">
+              <h1 class="panel-title" style="font-size:1.125rem;">Live Logs</h1>
+              <div class="live-badge" aria-label="Live stream active">
+                <span class="live-dot"></span>
+                LIVE
+              </div>
             </div>
+
+            <div class="logs-controls">
+              <select class="input-glass" style="width:110px;" x-model="logLevel"
+                      aria-label="Minimum log level">
+                <option value="DEBUG">DEBUG+</option>
+                <option value="INFO">INFO+</option>
+                <option value="WARNING">WARNING+</option>
+                <option value="ERROR">ERROR+</option>
+              </select>
+
+              <button class="btn-ghost" @click="logLines = []" aria-label="Clear logs">
+                Clear
+              </button>
+
+              <a class="btn-ghost" href="/internal/logs/download" aria-label="Download log file">
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+                Download
+              </a>
+            </div>
+          </div>
+
+          <div class="log-terminal" id="log-container" role="log" aria-live="polite" aria-label="Live log output">
+            <template x-for="(line, i) in filteredLogs()" :key="i">
+              <div class="log-line">
+                <span class="log-time" x-text="line.time"></span>
+                <span class="log-level-chip" :class="line.level" x-text="line.level"></span>
+                <span class="log-msg" x-text="line.message"></span>
+                <span class="log-provider" x-text="line.provider ?? ''"></span>
+              </div>
+            </template>
+            <div class="log-empty" x-show="filteredLogs().length === 0"
+                 aria-live="polite">
+              No log entries at this level yet.
+            </div>
+          </div>
+
+        </div><!-- /logs panel -->
+
+      </main><!-- /main-content -->
+    </div><!-- /app-body -->
+  </div><!-- /app-shell -->
+
+
+  <!-- ══════════════════════════════════════════════════════════
+       COMMAND PALETTE (Ctrl+K)
+       ══════════════════════════════════════════════════════════ -->
+  <template x-if="showCommandPalette">
+    <div class="cmd-overlay"
+         @click.self="showCommandPalette = false"
+         @keydown.escape.window="showCommandPalette = false"
+         role="dialog" aria-modal="true" aria-label="Command palette">
+
+      <div class="cmd-palette">
+        <div class="cmd-search-row">
+          <span class="cmd-search-icon" aria-hidden="true">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+          </span>
+          <input class="cmd-input"
+                 type="text"
+                 x-model="commandQuery"
+                 placeholder="Type a command…"
+                 x-ref="cmdInput"
+                 @keydown.enter="filteredCommands()[0] && filteredCommands()[0].action.call($data)"
+                 aria-label="Command search"
+                 autocomplete="off">
+          <span class="cmd-shortcut-hint" aria-label="Press Escape to close">ESC</span>
+        </div>
+
+        <div class="cmd-list" role="listbox" aria-label="Available commands">
+          <template x-for="cmd in filteredCommands()" :key="cmd.id">
+            <button class="cmd-item"
+                    @click="cmd.action.call($data)"
+                    role="option">
+              <span class="cmd-item-icon" x-html="navIcons[cmd.icon] ?? navIcons['dashboard']" aria-hidden="true"></span>
+              <span class="cmd-item-label" x-text="cmd.label"></span>
+              <span class="cmd-item-kbd" x-text="cmd.kbd ?? ''" x-show="cmd.kbd"></span>
+            </button>
           </template>
-          <div x-show="filteredLogs().length === 0" class="text-gray-600 py-4 text-center">
-            No log entries at this level yet.
+          <div x-show="filteredCommands().length === 0"
+               class="text-dim text-sm"
+               style="padding:16px 20px;">
+            No commands match "<span x-text="commandQuery"></span>"
           </div>
         </div>
-      </div><!-- /logs panel -->
 
-    </main>
-  </div>
+        <div class="cmd-footer" aria-hidden="true">
+          <span><kbd>↑↓</kbd> navigate</span>
+          <span><kbd>↵</kbd> run</span>
+          <span><kbd>ESC</kbd> close</span>
+        </div>
+      </div>
+
+    </div>
+  </template>
+
 </body>
 </html>
