@@ -37,7 +37,7 @@ from __future__ import annotations
 import time
 from collections import deque
 from enum import Enum
-from threading import Lock
+import asyncio
 from typing import Any
 
 from loguru import logger
@@ -78,46 +78,36 @@ class CircuitBreaker:
         self._half_open_probe_dispatched = False
 
         # Thread safety
-        self._lock = Lock()
+        self._lock = asyncio.Lock()
 
     # ------------------------------------------------------------------ #
     # State observation
     # ------------------------------------------------------------------ #
 
-    @property
-    def state(self) -> State:
+    async def get_state(self) -> State:
         """
-        Read-only state observation — does NOT claim a half-open probe
-        slot, so it's safe to call as often as you like (e.g. from
-        KeyPool.health_summary()) without affecting which actual request
-        gets treated as the half-open test. Lazily applies the
-        OPEN -> HALF_OPEN transition if the cooldown has elapsed, since
-        that part is just "time has passed" and is harmless to observe
-        from anywhere.
+        Read-only state observation.
         """
-        with self._lock:
+        async with self._lock:
             self._maybe_transition_to_half_open_locked()
             return self._state
 
-    @property
-    def cooldown_seconds(self) -> float:
-        with self._lock:
+    async def get_cooldown_seconds(self) -> float:
+        async with self._lock:
             return min(
                 self._base_cooldown_seconds * (2 ** max(self._trip_count - 1, 0)),
                 MAX_COOLDOWN_SECONDS,
             )
 
-    @property
-    def consecutive_429s(self) -> int:
-        with self._lock:
+    async def get_consecutive_429s(self) -> int:
+        async with self._lock:
             return self._consecutive_429
 
-    @property
-    def consecutive_timeouts(self) -> int:
-        with self._lock:
+    async def get_consecutive_timeouts(self) -> int:
+        async with self._lock:
             return self._consecutive_timeouts
 
-    def is_closed(self) -> bool:
+    async def is_closed(self) -> bool:
         """
         The actual gating check `KeyPool.pick_key()` uses.
 
@@ -126,10 +116,11 @@ class CircuitBreaker:
         OPEN, cooldown elapsed -> transitions to HALF_OPEN and returns
             True for exactly the first caller (claiming the probe slot);
             every other caller sees False until that probe's outcome is
+            every other caller sees False until that probe's outcome is
             recorded via record_success()/record_429()/record_timeout()/
             record_error().
         """
-        with self._lock:
+        async with self._lock:
             self._maybe_transition_to_half_open_locked()
             if self._state == "closed":
                 return True
@@ -140,12 +131,12 @@ class CircuitBreaker:
                 return False
             return False  # still open
 
-    def check_recovery(self) -> State:
+    async def check_recovery(self) -> State:
         """
         Explicit recovery check, useful for callers that want the latest
         state without claiming the half-open probe slot.
         """
-        with self._lock:
+        async with self._lock:
             self._maybe_transition_to_half_open_locked()
             return self._state
 
@@ -162,8 +153,8 @@ class CircuitBreaker:
     # Outcome recording
     # ------------------------------------------------------------------ #
 
-    def record_success(self) -> None:
-        with self._lock:
+    async def record_success(self) -> None:
+        async with self._lock:
             if self._state == "half_open":
                 self._close_locked()
                 return
@@ -171,8 +162,8 @@ class CircuitBreaker:
             self._consecutive_timeouts = 0
             self._recent_outcomes.append(True)
 
-    def record_429(self) -> None:
-        with self._lock:
+    async def record_429(self) -> None:
+        async with self._lock:
             self._consecutive_429 += 1
             self._consecutive_timeouts = 0
             self._recent_outcomes.append(False)
@@ -180,8 +171,8 @@ class CircuitBreaker:
                 trip_immediately=self._consecutive_429 >= CONSECUTIVE_429_THRESHOLD
             )
 
-    def record_timeout(self) -> None:
-        with self._lock:
+    async def record_timeout(self) -> None:
+        async with self._lock:
             self._consecutive_timeouts += 1
             self._consecutive_429 = 0
             self._recent_outcomes.append(False)
@@ -189,16 +180,16 @@ class CircuitBreaker:
                 trip_immediately=self._consecutive_timeouts >= CONSECUTIVE_TIMEOUT_THRESHOLD
             )
 
-    def record_error(self) -> None:
+    async def record_error(self) -> None:
         """Generic failure that's neither a 429 nor a timeout (e.g. a 5xx)."""
-        with self._lock:
+        async with self._lock:
             self._consecutive_429 = 0
             self._consecutive_timeouts = 0
             self._recent_outcomes.append(False)
             self._on_failure_locked(trip_immediately=False)
 
-    def reset(self) -> None:
-        with self._lock:
+    async def reset(self) -> None:
+        async with self._lock:
             self._state = "closed"
             self._consecutive_429 = 0
             self._consecutive_timeouts = 0
@@ -272,25 +263,25 @@ class CircuitBreakerStore:
     def __init__(self, base_cooldown_seconds: float = 30.0) -> None:
         self._breakers: dict[tuple[str, int], CircuitBreaker] = {}
         self._base_cooldown = base_cooldown_seconds
-        self._lock = Lock()
+        self._lock = asyncio.Lock()
 
-    def get(self, provider: str, key_index: int) -> CircuitBreaker:
+    async def get(self, provider: str, key_index: int) -> CircuitBreaker:
         key = (provider, key_index)
-        with self._lock:
+        async with self._lock:
             if key not in self._breakers:
                 self._breakers[key] = CircuitBreaker(self._base_cooldown)
             return self._breakers[key]
 
-    def reset_provider(self, provider: str) -> None:
-        with self._lock:
+    async def reset_provider(self, provider: str) -> None:
+        async with self._lock:
             for (p, _), cb in self._breakers.items():
                 if p == provider:
-                    cb.reset()
+                    await cb.reset()
 
-    def reset_all(self) -> None:
-        with self._lock:
+    async def reset_all(self) -> None:
+        async with self._lock:
             for cb in self._breakers.values():
-                cb.reset()
+                await cb.reset()
             self._breakers.clear()
 
 

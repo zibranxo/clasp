@@ -34,18 +34,7 @@ from __future__ import annotations
 
 from typing import Any
 
-try:
-    from loguru import logger
-except ModuleNotFoundError:  # pragma: no cover — shim for test environments
-    import logging as _logging
-
-    class _Shim:
-        _log = _logging.getLogger("clasp.payload_filter")
-
-        def debug(self, msg: str, **kw: Any) -> None:
-            self._log.debug(msg + ("  " + str(kw) if kw else ""))
-
-    logger = _Shim()  # type: ignore[assignment]
+from loguru import logger
 
 
 #: Per-provider list of top-level request body fields to strip before

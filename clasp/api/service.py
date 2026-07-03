@@ -38,11 +38,8 @@ import time
 import uuid
 from typing import Any, AsyncGenerator
 
-try:
-    from loguru import logger as _logger
-    _LOG = True
-except ImportError:
-    _LOG = False
+from loguru import logger as _logger
+_LOG = True
 
 from clasp.cache.response_cache import get_cache
 from clasp.utils.hash import hash_request
@@ -281,6 +278,11 @@ async def dispatch_stream(
     from clasp.providers.registry import get_registry  # noqa: PLC0415
     _kp = get_registry().get_key_pool(getattr(provider, "name", getattr(provider, "provider_name", "")))
 
+    # Save the original Claude model name before resolution — the SSEBuilder
+    # must put this (not the provider slug) in the message_start event,
+    # otherwise Claude Code rejects the response as coming from an unknown model.
+    original_model = anthropic_request.model
+
     # Update request model to the resolved model slug
     try:
         from clasp.config.settings import get_settings  # noqa: PLC0415
@@ -293,6 +295,9 @@ async def dispatch_stream(
         model_slug = resolve_model(anthropic_request, getattr(provider, "name", getattr(provider, "provider_name", "")), settings)
         if model_slug:
             anthropic_request.body["model"] = model_slug
+
+    # Store the original model so the transport layer can use it in the response
+    anthropic_request.body["_original_model"] = original_model
 
     # ── STEP 9 (pre-dispatch): request-shaping optimizer passes ────────
     if optimize_fn is None:
@@ -353,7 +358,7 @@ async def dispatch_stream(
         # Outcome feedback — keeps circuit breaker and TPM bucket in sync.
         if _kp is not None:
             if success:
-                _kp.record_success(key_index)
+                await _kp.record_success(key_index)
                 # TPM reconciliation: try to parse actual token usage from the
                 # collected SSE stream so consume_actual() can correct the
                 # pre-flight estimate.  Falls back silently if unparseable.
@@ -366,7 +371,7 @@ async def dispatch_stream(
                 except Exception:  # noqa: BLE001
                     pass
             else:
-                _kp.record_error(key_index)
+                await _kp.record_error(key_index)
         if _LOG:
             _logger.info(
                 "service: request complete",

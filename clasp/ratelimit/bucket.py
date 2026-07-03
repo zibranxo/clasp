@@ -143,15 +143,13 @@ class TokenBucket:
             async with self._lock:
                 self.tpm_tokens = max(0.0, self.tpm_tokens - delta)
 
-    def seconds_until_available(self) -> float:
+    async def seconds_until_available(self) -> float:
         """
         Estimated wall-clock seconds until at least 1 RPM token is available.
-
-        Best-effort, observability-only — reads rpm_tokens without acquiring
-        the lock, so concurrent mutations may make the result stale.
         """
-        deficit = max(0.0, 1.0 - self.rpm_tokens)
-        return deficit / self.rpm_refill_rate if self.rpm_refill_rate > 0 else 60.0
+        async with self._lock:
+            deficit = max(0.0, 1.0 - self.rpm_tokens)
+            return deficit / self.rpm_refill_rate if self.rpm_refill_rate > 0 else 60.0
 
     @property
     def rpm_used(self) -> int:

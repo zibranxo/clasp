@@ -91,7 +91,7 @@ class KeyPool:
                 if self._cooldown.is_cooling(self.provider_name, idx):
                     continue
 
-                if not self.circuit_breakers[idx].is_closed():
+                if not await self.circuit_breakers[idx].is_closed():
                     continue
 
                 # Atomic check-and-consume — no race between check and deduct.
@@ -120,50 +120,53 @@ class KeyPool:
     # request using a given key index completes)
     # ------------------------------------------------------------------ #
 
-    def record_success(self, key_index: int) -> None:
-        self.circuit_breakers[key_index].record_success()
+    async def record_success(self, key_index: int) -> None:
+        await self.circuit_breakers[key_index].record_success()
         self._cooldown.reset(self.provider_name, key_index)
 
-    def record_429(self, key_index: int, retry_after_header: str | None) -> float:
-        self.circuit_breakers[key_index].record_429()
+    async def record_429(self, key_index: int, retry_after_header: str | None) -> float:
+        await self.circuit_breakers[key_index].record_429()
         return self._cooldown.on_429(self.provider_name, key_index, retry_after_header)
 
-    def record_timeout(self, key_index: int) -> None:
-        self.circuit_breakers[key_index].record_timeout()
+    async def record_timeout(self, key_index: int) -> None:
+        await self.circuit_breakers[key_index].record_timeout()
 
-    def record_error(self, key_index: int) -> None:
-        self.circuit_breakers[key_index].record_error()
+    async def record_error(self, key_index: int) -> None:
+        await self.circuit_breakers[key_index].record_error()
 
     # ------------------------------------------------------------------ #
     # Health / introspection
     # ------------------------------------------------------------------ #
 
-    def health_summary(self) -> dict:
+    async def health_summary(self) -> dict:
+        healthy_count = 0
+        for i in range(len(self.keys)):
+            if not self._cooldown.is_cooling(self.provider_name, i):
+                state = await self.circuit_breakers[i].get_state()
+                if state in ("closed", "half_open"):
+                    healthy_count += 1
+        
+        keys_info = []
+        for i in range(len(self.keys)):
+            keys_info.append({
+                "index": i,
+                "redacted": _redact(self.keys[i]),
+                "status": await self._key_status(i),
+                "rpm_used": self.buckets[i].rpm_used,
+                "rpm_limit": self.buckets[i].rpm_capacity,
+                "recovery_in": self._cooldown.seconds_remaining(self.provider_name, i),
+            })
+            
         return {
             "total": len(self.keys),
-            "healthy": sum(
-                1
-                for i in range(len(self.keys))
-                if not self._cooldown.is_cooling(self.provider_name, i)
-                and self.circuit_breakers[i].state in ("closed", "half_open")
-            ),
-            "keys": [
-                {
-                    "index": i,
-                    "redacted": _redact(self.keys[i]),
-                    "status": self._key_status(i),
-                    "rpm_used": self.buckets[i].rpm_used,
-                    "rpm_limit": self.buckets[i].rpm_capacity,
-                    "recovery_in": self._cooldown.seconds_remaining(self.provider_name, i),
-                }
-                for i in range(len(self.keys))
-            ],
+            "healthy": healthy_count,
+            "keys": keys_info,
         }
 
-    def _key_status(self, index: int) -> str:
+    async def _key_status(self, index: int) -> str:
         if self._cooldown.is_cooling(self.provider_name, index):
             return "cooling"
-        cb_state = self.circuit_breakers[index].state
+        cb_state = await self.circuit_breakers[index].get_state()
         if cb_state == "open":
             return "circuit_open"
         if cb_state == "half_open":

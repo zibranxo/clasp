@@ -27,8 +27,6 @@ from __future__ import annotations
 
 import json
 import time
-from datetime import datetime, timezone
-from email.utils import parsedate_to_datetime
 from typing import AsyncIterator, Callable
 
 import httpx
@@ -43,45 +41,12 @@ from clasp.providers.base import (
 )
 from clasp.providers.common.message_converter import anthropic_to_openai
 from clasp.providers.common.sse_builder import SSEBuilder
+from clasp.providers.common.transport_utils import (
+    local_token_estimate,
+    parse_retry_after,
+)
 
 
-# --------------------------------------------------------------------------- #
-# Small local helpers
-# --------------------------------------------------------------------------- #
-
-
-def _local_token_estimate(text: str) -> int:
-    """
-    Crude ~4-chars-per-token estimate, used as a placeholder until
-    `providers/common/token_counter.py` (Sprint 1 step 10) lands with a
-    real tiktoken-based count. Good enough to feed `message_start`'s
-    `usage.input_tokens` and `ratelimit/bucket.py`'s pre-emptive TPM
-    check; not good enough for billing-accuracy use cases.
-    """
-    return max(1, len(text) // 4)
-
-
-def _parse_retry_after(value: str | None) -> float | None:
-    """
-    Parse a `Retry-After` header value, which per RFC 9110 is either an
-    integer number of seconds or an HTTP-date. Returns seconds remaining
-    (clamped to >= 0), or None if the header is absent/unparseable.
-    """
-    if not value:
-        return None
-    value = value.strip()
-    try:
-        return max(float(value), 0.0)
-    except ValueError:
-        pass
-    try:
-        dt = parsedate_to_datetime(value)
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
-        delta = (dt - datetime.now(timezone.utc)).total_seconds()
-        return max(delta, 0.0)
-    except (TypeError, ValueError):
-        return None
 
 
 # --------------------------------------------------------------------------- #
@@ -185,6 +150,7 @@ class OpenAIChatTransport(BaseProvider):
         api_key = key
         
         request_dict = request if isinstance(request, dict) else request.model_dump(exclude_none=True)
+        original_model = request_dict.get("_original_model", model)
         payload = anthropic_to_openai(
             request_dict,
             merge_system=self._should_merge_system(model),
@@ -196,8 +162,8 @@ class OpenAIChatTransport(BaseProvider):
             payload["stream_options"] = {"include_usage": True}
 
         headers = self._build_headers(api_key)
-        estimated_input_tokens = _local_token_estimate(json.dumps(payload, default=str))
-        builder = SSEBuilder(model=model, input_tokens=estimated_input_tokens)
+        estimated_input_tokens = local_token_estimate(json.dumps(payload, default=str))
+        builder = SSEBuilder(model=original_model, input_tokens=estimated_input_tokens)
 
         try:
             async with self.client.stream(
@@ -207,7 +173,7 @@ class OpenAIChatTransport(BaseProvider):
                     body_bytes = await response.aread()
                     body_text = body_bytes.decode("utf-8", errors="replace")
                     retry_after = (
-                        _parse_retry_after(response.headers.get("retry-after"))
+                        parse_retry_after(response.headers.get("retry-after"))
                         if response.status_code == 429
                         else None
                     )
@@ -215,7 +181,7 @@ class OpenAIChatTransport(BaseProvider):
                         raise UpstreamRateLimitError(retry_after=str(retry_after) if retry_after is not None else None)
                     raise ProviderHTTPError(
                         response.status_code,
-                        f"{self.name}: upstream returned {response.status_code}",
+                        f"{self.name}: upstream returned {response.status_code}: {body_text[:500]}",
                     )
 
                 async for raw_line in response.aiter_lines():
@@ -274,7 +240,7 @@ class OpenAIChatTransport(BaseProvider):
         step 10): rough chars/4 estimate over the raw Anthropic-shaped
         request JSON. Directionally correct, not billing-accurate.
         """
-        return _local_token_estimate(json.dumps(request, default=str))
+        return local_token_estimate(json.dumps(request, default=str))
 
     # ------------------------------------------------------------------ #
     # list_models()

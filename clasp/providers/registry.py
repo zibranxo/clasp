@@ -64,27 +64,7 @@ from __future__ import annotations
 from dataclasses import replace as _dc_replace
 from typing import TYPE_CHECKING, Any
 
-try:
-    from loguru import logger
-except ModuleNotFoundError:  # pragma: no cover
-    import logging as _logging
-
-    class _Shim:
-        _log = _logging.getLogger("clasp.registry")
-
-        def info(self, msg: str, **kw: Any) -> None:
-            self._log.info(msg + ("  " + str(kw) if kw else ""))
-
-        def warning(self, msg: str, **kw: Any) -> None:
-            self._log.warning(msg + ("  " + str(kw) if kw else ""))
-
-        def debug(self, msg: str, **kw: Any) -> None:
-            self._log.debug(msg + ("  " + str(kw) if kw else ""))
-
-        def error(self, msg: str, **kw: Any) -> None:
-            self._log.error(msg + ("  " + str(kw) if kw else ""))
-
-    logger = _Shim()  # type: ignore[assignment]
+from loguru import logger
 
 from clasp.config.provider_catalog import PROVIDER_CATALOG, ProviderProfile
 from clasp.providers.base import BaseProvider

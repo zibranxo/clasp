@@ -45,6 +45,7 @@ from clasp.providers.base import (
     ProviderTimeoutError,
     UpstreamRateLimitError,
 )
+from clasp.providers.common.transport_utils import parse_retry_after, local_token_estimate
 
 
 # --------------------------------------------------------------------------- #
@@ -54,15 +55,6 @@ from clasp.providers.base import (
 # --------------------------------------------------------------------------- #
 
 
-def _local_token_estimate(text: str) -> int:
-    """
-    Crude ~4-chars-per-token placeholder, same heuristic
-    openai_transport.py uses, pending `providers/common/token_counter.py`
-    (Sprint 1 step 10). Calling the real upstream `/count_tokens`
-    endpoint would need an `api_key`, which `BaseProvider.count_tokens()`'s
-    signature doesn't carry — left as a local-only estimate for now.
-    """
-    return max(1, len(text) // 4)
 
 
 def _parse_retry_after(value: str | None) -> float | None:
@@ -202,7 +194,7 @@ class AnthropicMessagesTransport(BaseProvider):
                     body_bytes = await response.aread()
                     body_text = body_bytes.decode("utf-8", errors="replace")
                     retry_after = (
-                        _parse_retry_after(response.headers.get("retry-after"))
+                        parse_retry_after(response.headers.get("retry-after"))
                         if response.status_code == 429
                         else None
                     )
@@ -210,12 +202,14 @@ class AnthropicMessagesTransport(BaseProvider):
                         raise UpstreamRateLimitError(retry_after=str(retry_after) if retry_after is not None else None)
                     raise ProviderHTTPError(
                         response.status_code,
-                        f"{self.name}: upstream returned {response.status_code}",
+                        f"{self.name}: upstream returned {response.status_code}: {body_text[:500]}",
                     )
 
-                async for text_chunk in response.aiter_text():
-                    if text_chunk:
-                        yield text_chunk
+                async for raw_line in response.aiter_lines():
+                    if raw_line:
+                        yield raw_line + "\n"
+                    else:
+                        yield "\n"
 
         except httpx.TimeoutException as e:
             raise ProviderTimeoutError(f"{self.name}: timed out: {e}") from e

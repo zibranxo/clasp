@@ -72,7 +72,7 @@ async def on_upstream_429(
     # ── 1. Update state ─────────────────────────────────────────────────
     pool = registry.get_key_pool(failed_provider)
     if pool is not None:
-        wait_s = pool.record_429(failed_key_index, retry_after_header)
+        wait_s = await pool.record_429(failed_key_index, retry_after_header)
     else:
         wait_s = cooldown_mgr.on_429(failed_provider, failed_key_index, retry_after_header)
 

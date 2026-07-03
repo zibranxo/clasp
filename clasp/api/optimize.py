@@ -54,18 +54,7 @@ import uuid
 from dataclasses import dataclass
 from typing import Any, Literal
 
-try:
-    from loguru import logger
-except ModuleNotFoundError:  # pragma: no cover
-    import logging as _logging
-
-    class _Shim:
-        _log = _logging.getLogger("clasp.optimize")
-        def debug(self, m: str, **kw: Any) -> None: self._log.debug(m)
-        def info(self, m: str, **kw: Any) -> None: self._log.info(m)
-        def warning(self, m: str, **kw: Any) -> None: self._log.warning(m)
-
-    logger = _Shim()  # type: ignore[assignment]
+from loguru import logger
 
 
 # ---------------------------------------------------------------------------

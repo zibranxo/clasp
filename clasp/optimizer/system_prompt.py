@@ -70,18 +70,7 @@ import time
 from dataclasses import dataclass
 from typing import Any
 
-try:
-    from loguru import logger
-except ModuleNotFoundError:  # pragma: no cover — shim for test environments
-    import logging as _logging
-
-    class _Shim:
-        _log = _logging.getLogger("clasp.system_prompt")
-
-        def debug(self, msg: str, **kw: Any) -> None:
-            self._log.debug(msg + ("  " + str(kw) if kw else ""))
-
-    logger = _Shim()  # type: ignore[assignment]
+from loguru import logger
 
 from clasp.providers.common.token_counter import estimate_tokens
 

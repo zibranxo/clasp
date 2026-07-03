@@ -45,18 +45,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-try:
-    from loguru import logger
-except ModuleNotFoundError:  # pragma: no cover — shim for test environments
-    import logging as _logging
-
-    class _Shim:
-        _log = _logging.getLogger("clasp.model_map")
-
-        def debug(self, msg: str, **kw: Any) -> None:
-            self._log.debug(msg + ("  " + str(kw) if kw else ""))
-
-    logger = _Shim()  # type: ignore[assignment]
+from loguru import logger
 
 if TYPE_CHECKING:
     from clasp.config.settings import Settings

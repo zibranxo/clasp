@@ -330,10 +330,19 @@ def _sse_headers(request_id: str) -> dict[str, str]:
     }
 
 
-async def _wrap_async_iter(ait: AsyncIterator[str]) -> AsyncIterator[bytes]:
-    """Encode each SSE string line to UTF-8 bytes for StreamingResponse."""
+async def _wrap_async_iter(ait: AsyncIterator[str | bytes]) -> AsyncIterator[bytes]:
+    """Ensure each yielded chunk is UTF-8 bytes for StreamingResponse.
+
+    ``dispatch_stream`` yields bytes from every code path (cache hits,
+    ``_sse_event``, ``_error_event``, provider stream chunks already
+    encoded at service.py L333), so the common case is a no-op passthrough.
+    Strings are encoded as a safety net.
+    """
     async for chunk in ait:
-        yield chunk.encode("utf-8")
+        if isinstance(chunk, bytes):
+            yield chunk
+        else:
+            yield chunk.encode("utf-8")
 
 
 @router.post("/stop", dependencies=[Depends(_verify_bearer)])

@@ -125,7 +125,10 @@ class ConfigWatcher:
             # since the cache is clear, it will try to parse once more and
             # either succeed (race condition fixed itself) or fail again.
             # Either way, re-raise is intentionally swallowed here.
-            return get_settings()
+            try:
+                return get_settings()
+            except Exception:
+                return None
 
         logger.info(
             "Config hot-reloaded",
