@@ -58,6 +58,12 @@ async def root_redirect() -> RedirectResponse:
 @router.get("/ui", include_in_schema=False)
 async def serve_index() -> FileResponse:
     """Serve the single-page app entry point."""
+    # Try to serve React UI first if it exists
+    react_index = Path(__file__).parent / "static-react" / "index.html"
+    if react_index.is_file():
+        return FileResponse(react_index, media_type="text/html")
+
+    # Fallback to Alpine.js UI
     index = STATIC_DIR / "index.html"
     if not index.is_file():
         logger.error("index.html not found", path=str(index))
@@ -110,3 +116,15 @@ def mount_static(app: "FastAPI") -> None:  # noqa: F821 — type-only forward re
             "Skipping static mount — directory missing",
             static_dir=str(STATIC_DIR),
         )
+
+    # Mount React UI static files if they exist
+    react_static_dir = Path(__file__).parent / "static-react"
+    if react_static_dir.is_dir():
+        app.mount(
+            "/ui/react",
+            StaticFiles(directory=str(react_static_dir)),
+            name="ui_react",
+        )
+        logger.debug("React UI files mounted", path=str(react_static_dir), mount="/ui/react")
+    else:
+        logger.info("React UI files not found — using Alpine.js UI as fallback")

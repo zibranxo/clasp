@@ -125,18 +125,15 @@ def _settings_to_dict(s: Settings) -> dict[str, Any]:
 
 async def _get_live_status() -> dict[str, Any]:
     """
-    Return the current system status snapshot.
-
-    Sprint 1: returns a minimal healthy stub.
-    Sprint 2+: import from clasp.ratelimit and clasp.queue registries.
+    Return the current system status snapshot from telemetry.
     """
     try:
-        from clasp.api.service import get_service_stats  # type: ignore[import]
-
+        from clasp.telemetry import get_service_stats
         return await get_service_stats()
     except ImportError:
         pass
 
+    # Fallback if telemetry is somehow not loaded
     settings = get_settings()
     return {
         "status": "healthy",
@@ -150,30 +147,7 @@ async def _get_live_status() -> dict[str, Any]:
         "absorbed_429s_today": 0,
         "failovers_today": 0,
         "cache_hits_today": 0,
-        "providers": {
-            name: {
-                "status": "HEALTHY" if pcfg.enabled else "OFF",
-                "requests_today": 0,
-                "tokens_today": 0,
-                "daily_token_limit": None,
-                "errors_today": 0,
-                "p50_latency_ms": None,
-                "keys": [
-                    {
-                        "index": i,
-                        "redacted": _mask_key(k),
-                        "status": "HEALTHY",
-                        "rpm_used": 0,
-                        "rpm_limit": getattr(
-                            PROVIDER_CATALOG.get(name), "rpm_limit", None
-                        ),
-                        "recovery_in": None,
-                    }
-                    for i, k in enumerate(pcfg.keys)
-                ],
-            }
-            for name, pcfg in settings.providers.items()
-        },
+        "providers": {}
     }
 
 
@@ -337,6 +311,35 @@ async def import_config(request: Request) -> dict[str, Any]:
         pass
 
     logger.info("Config imported via /internal/config/import")
+
+
+# ---------------------------------------------------------------------------
+# ── Routing Events (for React UI) ──────────────────────────────────────────
+# ---------------------------------------------------------------------------
+
+
+@router.get("/routing-events", summary="List routing events")
+async def list_routing_events() -> list[dict[str, Any]]:
+    """
+    Return recent routing events for the dashboard.
+    """
+    try:
+        from clasp.api.service import get_recent_routing_events  # type: ignore[import]
+        return await get_recent_routing_events()
+    except ImportError:
+        return []
+
+
+@router.post("/routing-events/clear", summary="Clear routing events")
+async def clear_routing_events() -> dict[str, Any]:
+    """
+    Clear all routing events.
+    """
+    try:
+        from clasp.api.service import clear_routing_events  # type: ignore[import]
+        await clear_routing_events()
+    except ImportError:
+        pass
     return {"status": "ok"}
 
 
@@ -671,22 +674,62 @@ async def download_logs() -> PlainTextResponse:
 # ---------------------------------------------------------------------------
 
 
-@router.post("/cache/clear", summary="Evict all cached responses")
-async def clear_cache() -> dict[str, Any]:
+@router.get("/session", summary="Get current session")
+async def get_session() -> dict[str, Any]:
     """
-    Evict every entry from both the in-memory LRU cache and the SQLite cache.
-    Sprint 1: stub (cache not yet implemented).
-    Sprint 5+: delegates to clasp.cache.response_cache.
+    Return the current session information.
+    For the web UI, this provides basic session management.
     """
-    entries_removed = 0
-    try:
-        from clasp.cache.response_cache import get_cache  # type: ignore[import]
+    # Simple session management for web UI
+    # In a production app, you'd use proper session management with cookies
+    return {
+        "session_id": "web-session-" + str(hash("web-user")),
+        "user_id": "web-user",
+        "email": "web@example.com"
+    }
 
-        cache = get_cache()
-        if cache:
-            entries_removed = await cache.clear()
+
+@router.post("/session", summary="Create/update session")
+async def save_session(session: dict[str, Any]) -> dict[str, Any]:
+    """
+    Save session information.
+    """
+    # For web UI, we just return success
+    return {"status": "ok", "session": session}
+
+
+@router.delete("/session", summary="Clear session")
+async def clear_session() -> dict[str, Any]:
+    """
+    Clear the current session.
+    """
+
+
+# ---------------------------------------------------------------------------
+# ── Routing Events (for React UI) ──────────────────────────────────────────
+# ---------------------------------------------------------------------------
+
+
+@router.get("/routing-events", summary="List routing events")
+async def list_routing_events() -> list[dict[str, Any]]:
+    """
+    Return recent routing events for the dashboard.
+    """
+    try:
+        from clasp.api.service import get_recent_routing_events  # type: ignore[import]
+        return await get_recent_routing_events()
+    except ImportError:
+        return []
+
+
+@router.post("/routing-events/clear", summary="Clear routing events")
+async def clear_routing_events() -> dict[str, Any]:
+    """
+    Clear all routing events.
+    """
+    try:
+        from clasp.api.service import clear_routing_events  # type: ignore[import]
+        await clear_routing_events()
     except ImportError:
         pass
-
-    logger.info("Cache cleared", entries_removed=entries_removed)
-    return {"cleared": True, "entries_removed": entries_removed}
+    return {"status": "ok"}

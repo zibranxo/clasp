@@ -1,0 +1,49 @@
+@import url('https://fonts.googleapis.com/css2?family=Lexend:wght@400;500;600;700&family=Space+Grotesk:wght@400;500;600;700;800;900&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  body {
+    @apply bg-neo-bg text-neo-dark;
+    -webkit-font-smoothing: antialiased;
+  }
+  
+  code, pre {
+    font-family: 'JetBrains Mono', monospace;
+  }
+
+  /* Custom Scrollbar */
+  ::-webkit-scrollbar {
+    width: 12px;
+    height: 12px;
+  }
+  ::-webkit-scrollbar-track {
+    @apply bg-neo-bg border-l-3 border-neo-dark;
+  }
+  ::-webkit-scrollbar-thumb {
+    @apply bg-neo-yellow border-3 border-neo-dark;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    @apply bg-neo-pink;
+  }
+}
+
+@layer components {
+  .keyking-card {
+    @apply bg-white border-3 border-neo-dark rounded-none p-6 shadow-neo-md transition-all duration-200;
+  }
+  
+  .keyking-card:hover {
+    @apply -translate-y-1 shadow-neo-lg;
+  }
+  
+  .keyking-accent {
+    @apply text-neo-pink;
+  }
+  
+  .glass-panel {
+    @apply bg-neo-cyan border-3 border-neo-dark;
+  }
+}

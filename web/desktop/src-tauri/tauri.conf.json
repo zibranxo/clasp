@@ -1,0 +1,44 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Key King",
+  "version": "3.2.2",
+  "identifier": "com.keyking.desktop",
+  "build": {
+    "beforeBuildCommand": "npm run build",
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://localhost:5173",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "Key King",
+        "width": 1280,
+        "height": 800,
+        "resizable": true
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ]
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDQ0NDIyNzZGQzNBMDZCMEUKUldRT2E2RERieWRDUkJ3UDMvT0dMeWVQRUxaWGVTclM3NlBlRW5yTlJtd3Y3RzJMbmR0RGljYzYK",
+      "endpoints": [
+        "https://github.com/Malaybhai11/keyking/releases/latest/download/latest.json"
+      ]
+    }
+  }
+}

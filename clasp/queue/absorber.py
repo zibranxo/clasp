@@ -82,6 +82,13 @@ async def on_upstream_429(
         key_index=failed_key_index,
         cooldown_seconds=wait_s,
     )
+    
+    try:
+        from clasp.telemetry import get_telemetry
+        import asyncio
+        asyncio.create_task(get_telemetry().record_request(provider=failed_provider, is_429=True))
+    except ImportError:
+        pass
 
     # ── 2. Immediate failover ───────────────────────────────────────────
     selection = await selector.select(
@@ -98,6 +105,12 @@ async def on_upstream_429(
             from_provider=failed_provider,
             to_provider=provider.provider_name,
         )
+        try:
+            from clasp.telemetry import get_telemetry
+            import asyncio
+            asyncio.create_task(get_telemetry().record_request(provider=provider.provider_name, is_failover=True))
+        except ImportError:
+            pass
         async for chunk in provider.stream(request, key=key, key_index=key_idx):
             yield chunk
         return

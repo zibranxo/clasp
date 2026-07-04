@@ -74,7 +74,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.queue_mgr = queue_mgr
 
     from clasp.ratelimit.persistence import load_state, periodic_save_task
-    from clasp.api.service import get_daily_counters, set_daily_counters
+    from clasp.telemetry import get_daily_counters, set_daily_counters
 
     # Load persistent state (cooldowns + daily metrics)
     loaded_counters = await asyncio.to_thread(load_state, cooldown_mgr)

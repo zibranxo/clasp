@@ -13,7 +13,8 @@ sys.path.insert(0, str(ROOT))
 
 
 from clasp.providers.base import ProviderHTTPError, ProviderTimeoutError
-from clasp.providers.openai_transport import OpenAIChatTransport, _parse_retry_after
+from clasp.providers.openai_transport import OpenAIChatTransport
+from clasp.providers.common.transport_utils import parse_retry_after
 
 
 class _FakeResponse:
@@ -67,8 +68,8 @@ class _FakeClient:
 
 
 def test_parse_retry_after_seconds_and_invalid() -> None:
-    assert _parse_retry_after("12") == 12.0
-    assert _parse_retry_after("bogus") is None
+    assert parse_retry_after("12") == 12.0
+    assert parse_retry_after("bogus") is None
 
 
 def test_build_headers_merges_auth_and_extra_headers() -> None:
