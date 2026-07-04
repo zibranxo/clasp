@@ -1,0 +1,274 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CLASP Command Palette Test</title>
+    <script src="https://cdn.jsdelivr.net/npm/alpinejs@3/dist/cdn.min.js" defer></script>
+    <style>
+        :root {
+            --neo-bg: #fcf6e6;
+            --neo-dark: #000000;
+            --neo-light: #ffffff;
+            --neo-yellow: #fde047;
+        }
+
+        body {
+            font-family: sans-serif;
+            background: var(--neo-bg);
+            margin: 0;
+            padding: 20px;
+        }
+
+        .neo-card {
+            background: var(--neo-light);
+            border: 3px solid var(--neo-dark);
+            box-shadow: 4px 4px 0px 0px var(--neo-dark);
+        }
+
+        .neo-input {
+            border: 2px solid var(--neo-dark);
+            padding: 8px 12px;
+            font-size: 16px;
+            width: 100%;
+        }
+
+        [x-cloak] { display: none !important; }
+    </style>
+</head>
+<body>
+    <h1>CLASP Command Palette Test</h1>
+    <p>Press Ctrl+K or Cmd+K to open the command palette</p>
+
+    <div x-data="app" x-cloak>
+        <div @click="openCommandPalette()" style="cursor: pointer; padding: 10px; border: 2px solid #000; display: inline-block; margin: 20px 0;">
+            Click to Open Command Palette (or press Ctrl+K)
+        </div>
+    </div>
+
+    <!-- Command Palette Modal -->
+    <div x-data="app" x-show="commandPalette.open" @keydown.escape="closeCommandPalette()"
+         class="fixed inset-0 z-50 flex items-start pt-20 bg-black bg-opacity-50 backdrop-blur-sm"
+         x-cloak>
+        <div class="w-full max-w-2xl mx-auto" @click.away="closeCommandPalette()">
+            <div class="neo-card mx-4">
+                <div class="p-4 border-b-3 border-neo-dark" style="border-bottom: 3px solid var(--neo-dark);">
+                    <div class="flex items-center gap-3">
+                        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
+                            <polyline points="14 2 14 8 20 8"></polyline>
+                            <line x1="16" y1="13" x2="8" y2="13"></line>
+                            <line x1="16" y1="17" x2="8" y2="17"></line>
+                            <polyline points="10 9 9 9 8 9"></polyline>
+                        </svg>
+                        <input type="text" x-ref="commandInput" x-model="commandPalette.query"
+                               @input.debounce.150ms="filterCommands()"
+                               placeholder="Type a command or search..."
+                               class="neo-input font-bold text-lg flex-1"
+                               @keydown.up.prevent="navigateCommands('up')"
+                               @keydown.down.prevent="navigateCommands('down')"
+                               @keydown.enter.prevent="executeCommand()">
+                    </div>
+                </div>
+
+                <div class="max-h-96 overflow-y-auto" style="max-height: 24rem; overflow-y: auto;">
+                    <div x-show="commandPalette.filteredCommands.length > 0" class="p-4">
+                        <h3 class="font-bold text-sm uppercase text-neo-dark/70 mb-2" style="color: rgba(0,0,0,0.7);">Commands</h3>
+                        <div x-ref="commandList" class="space-y-1">
+                            <template x-for="(cmd, index) in commandPalette.filteredCommands" :key="cmd.id">
+                                <div class="flex items-center gap-3 p-2 rounded cursor-pointer"
+                                     :class="{
+                                       'bg-neo-yellow/50 selected': index === commandPalette.selectedIndex,
+                                       'hover:bg-neo-gray/50': index !== commandPalette.selectedIndex
+                                     }"
+                                     style="background-color: var(--neo-yellow);"
+                                     @click="commandPalette.selectedIndex = index; executeCommand()">
+                                    <span class="font-bold" x-text="cmd.name"></span>
+                                    <span class="text-xs text-neo-dark/60 flex-1" style="color: rgba(0,0,0,0.6);" x-text="cmd.description"></span>
+                                    <span class="text-xs" style="border: 2px solid var(--neo-dark); padding: 2px 6px;" x-text="cmd.category"></span>
+                                </div>
+                            </template>
+                        </div>
+                    </div>
+
+                    <div x-show="commandPalette.filteredCommands.length === 0 && commandPalette.query" class="p-8 text-center">
+                        <p class="text-neo-dark/60 font-bold" style="color: rgba(0,0,0,0.6);">No commands found for "<span x-text="commandPalette.query"></span>"</p>
+                        <p class="text-xs text-neo-dark/40 mt-2" style="color: rgba(0,0,0,0.4);">Try a different search term</p>
+                    </div>
+
+                    <div x-show="!commandPalette.query && commandPalette.filteredCommands.length === 0" class="p-8 text-center">
+                        <h3 class="font-bold text-lg mb-2">Command Palette</h3>
+                        <p class="text-neo-dark/60 text-sm mb-4" style="color: rgba(0,0,0,0.6);">Quickly access any action with keyboard shortcuts</p>
+                        <div class="flex justify-center gap-4 text-xs">
+                            <kbd class="neo-badge" style="border: 2px solid var(--neo-dark); padding: 2px 6px;">⌘K</kbd>
+                            <kbd class="neo-badge" style="border: 2px solid var(--neo-dark); padding: 2px 6px;">Ctrl+K</kbd>
+                            <span class="text-neo-dark/40" style="color: rgba(0,0,0,0.4);">to open</span>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="p-3 border-t-3 border-neo-dark flex justify-between items-center text-xs font-bold" style="border-top: 3px solid var(--neo-dark);">
+                    <div class="flex items-center gap-2">
+                        <kbd class="neo-badge" style="border: 2px solid var(--neo-dark); padding: 2px 6px;">↑↓</kbd>
+                        <span>Navigate</span>
+                    </div>
+                    <div class="flex items-center gap-2">
+                        <kbd class="neo-badge" style="border: 2px solid var(--neo-dark); padding: 2px 6px;">↩</kbd>
+                        <span>Select</span>
+                    </div>
+                    <div class="flex items-center gap-2">
+                        <kbd class="neo-badge" style="border: 2px solid var(--neo-dark); padding: 2px 6px;">ESC</kbd>
+                        <span>Close</span>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        function createApp() {
+            return {
+                commandPalette: {
+                    open: false,
+                    query: '',
+                    filteredCommands: [],
+                    history: [],
+                    favorites: [],
+                    selectedIndex: 0
+                },
+
+                commands: [
+                    {
+                        id: 'test_connection',
+                        name: 'Test Connection',
+                        description: 'Test connection to a provider',
+                        action: () => alert('Testing connection...'),
+                        category: 'Providers'
+                    },
+                    {
+                        id: 'add_key',
+                        name: 'Add API Key',
+                        description: 'Add a new API key',
+                        action: () => alert('Adding API key...'),
+                        category: 'Providers'
+                    },
+                    {
+                        id: 'save_config',
+                        name: 'Save Configuration',
+                        description: 'Save all changes',
+                        action: () => alert('Saving configuration...'),
+                        category: 'Configuration'
+                    },
+                    {
+                        id: 'export_config',
+                        name: 'Export Configuration',
+                        description: 'Export config as file',
+                        action: () => alert('Exporting configuration...'),
+                        category: 'Configuration'
+                    },
+                    {
+                        id: 'clear_cache',
+                        name: 'Clear Cache',
+                        description: 'Clear response cache',
+                        action: () => alert('Clearing cache...'),
+                        category: 'Cache'
+                    }
+                ],
+
+                openCommandPalette() {
+                    this.commandPalette.open = true;
+                    this.commandPalette.query = '';
+                    this.commandPalette.selectedIndex = 0;
+                    this.filterCommands();
+                    this.$nextTick(() => {
+                        this.$refs.commandInput.focus();
+                    });
+                },
+
+                closeCommandPalette() {
+                    this.commandPalette.open = false;
+                },
+
+                filterCommands() {
+                    const query = this.commandPalette.query.toLowerCase();
+                    if (!query) {
+                        this.commandPalette.filteredCommands = [...this.commands];
+                    } else {
+                        this.commandPalette.filteredCommands = this.commands.filter(cmd =>
+                            cmd.name.toLowerCase().includes(query) ||
+                            cmd.description.toLowerCase().includes(query) ||
+                            cmd.category.toLowerCase().includes(query)
+                        );
+                    }
+                },
+
+                executeCommand() {
+                    const cmd = this.commandPalette.filteredCommands[this.commandPalette.selectedIndex];
+                    if (cmd) {
+                        cmd.action();
+                        this.closeCommandPalette();
+                    }
+                },
+
+                navigateCommands(direction) {
+                    if (this.commandPalette.filteredCommands.length === 0) return;
+
+                    if (direction === 'up') {
+                        this.commandPalette.selectedIndex = Math.max(0, this.commandPalette.selectedIndex - 1);
+                    } else if (direction === 'down') {
+                        this.commandPalette.selectedIndex = Math.min(
+                            this.commandPalette.filteredCommands.length - 1,
+                            this.commandPalette.selectedIndex + 1
+                        );
+                    }
+
+                    this.$nextTick(() => {
+                        const selectedEl = this.$refs.commandList?.querySelector('.selected');
+                        if (selectedEl) {
+                            selectedEl.scrollIntoView({ block: 'nearest' });
+                        }
+                    });
+                }
+            };
+        }
+
+        // Initialize Alpine
+        document.addEventListener('alpine:init', () => {
+            Alpine.data('app', createApp);
+        });
+
+        // Keyboard shortcuts
+        document.addEventListener('keydown', (e) => {
+            const app = Alpine.store('app') || document.querySelector('[x-data="app"]')?.$data;
+
+            if (!app) return;
+
+            // Ctrl+K or Cmd+K to open command palette
+            if ((e.ctrlKey || e.metaKey) && e.key === 'k') {
+                e.preventDefault();
+                app.openCommandPalette();
+            }
+
+            // Escape to close command palette
+            if (e.key === 'Escape' && app.commandPalette.open) {
+                e.preventDefault();
+                app.closeCommandPalette();
+            }
+
+            // Command palette navigation
+            if (app.commandPalette.open) {
+                if (e.key === 'ArrowUp') {
+                    e.preventDefault();
+                    app.navigateCommands('up');
+                } else if (e.key === 'ArrowDown') {
+                    e.preventDefault();
+                    app.navigateCommands('down');
+                } else if (e.key === 'Enter') {
+                    e.preventDefault();
+                    app.executeCommand();
+                }
+            }
+        });
+    </script>
+</body>
+</html>

@@ -1,162 +1,143 @@
-Claude finished the response
+# CLASP — Web UI Reality Pass + Feature Roadmap
 
-this is my current claude.md current progress is. the api switching is working and now i want towrok on the cosmetics. stick to plan.md and the bbroerser interface. rn its too bad. all vibecoded no functionality only front end. i want all named fucntions in current fornten to work. dont drop anything make everytihnwork and not fake vlaurs. for explae the api testing usnit is all fakr it shows fake latency i dontwant that  iwant true and real deal. for the ui i want you to write to remeber that what the llm thinks is best is not the best i need alternate things. 
+> Two phases in this file. Phase 0 is the reality pass (make what already exists
+> real). Phase 1+ is new feature work from PLANNN.md. Do not start Phase 1 until
+> Phase 0 is verified complete — building new features on a UI that's still
+> partly faking data just gives you more surface area to fake on.
 
-write me a new claude code. ive also attatched my plan.md for ref
-Architected functional frontend implementation guide with audit-first methodology
+## Note on source documents
 
-Structured as: audit first (function-by-function table, real vs fake, mapped to plan.md §5/§17), stop for your sign-off, then fix in the order you pick, then verify with actual live calls — not visual checks.
+- `plan.md` — the actual technical spec: architecture, endpoint contracts,
+  provider/routing logic. This is the source of truth for how the backend works
+  and what's real.
+- `PLANNN.md` — a feature roadmap (KeyKing-inspired additions: tour, update
+  checker, command palette, vault encryption, priority rules, team collab,
+  analytics, model catalog, anomaly detection, dark mode). Treat this as a
+  prioritized feature list and objectives only. Do not treat its "Current State
+  Assessment" section as fact — it claims the UI is production-ready and fully
+  functional, which is not confirmed and may just be wrong. Go by the actual
+  audit (`ui_audit.md` / `ui_verification.md` from the reality pass), not by
+  what a planning doc asserts about itself.
+- Ignore PLANNN.md's success metrics (support ticket %, satisfaction scores,
+  adoption rates), team structure (FTEs), and budget sections. This is a
+  solo-built tool for personal/portfolio use, not a staffed product team. Those
+  numbers aren't measurable here and treating them as targets would mean
+  reporting against made-up baselines — the same fake-data problem this whole
+  project is trying to eliminate. Acceptance criteria for every feature below is
+  binary: it does the real thing it claims to do, or it doesn't.
 
-Key things baked in per your ask:
-
-    Explicit ban list for fake patterns (Math.random() latency, setTimeout-simulated calls, hardcoded dashboard numbers) so it can't quietly re-fake something under a different name.
-    [Test] key button is called out specifically since that's your worst offender — must be a real authenticated round-trip against the real provider, real measured latency_ms, real error on failure.
-    Alternatives rule: anywhere plan.md doesn't fully pin the decision, it has to give you two real options with tradeoffs instead of silently shipping its first idea.
-    No dropping existing named functions while fixing others — audit has to account for every one before touching code.
-
-Claude
-Document · MD 
-Want to be notified when Claude responds?
-
-
-Claude is AI and can make mistakes. Please double-check responses.
-Claude · MD
-# CLASP — Web UI Reality Pass (Implementation Session)
- 
-> Use this CLAUDE.md for the session where you make the existing web UI actually work.
-> Core provider-switching/routing logic is done. The UI (`ui/static/index.html`,
-> `app.js`, `style.css`) was built fast and looks right but is substantially fake:
-> mocked numbers, simulated latency, buttons that don't call anything real. This
-> session's job is to make every named function in the current frontend do the real
-> thing it claims to do, per plan.md — nothing more, nothing invented.
- 
 ## Role for this session
- 
-You are implementing, not reviewing. But you are implementing against an existing
-UI, not building a new one. Do not redesign panels, rename functions, or restructure
-`app.js` beyond what's needed to make each existing named function real. If a function
-name in the current frontend doesn't match anything real, your job is to make it real
-— not to delete it, not to quietly replace it with something else you think is better.
- 
-## Project context
- 
-CLASP — rate-limit-aware multi-provider proxy so Claude Code can use free-tier
-OpenAI-compatible APIs without hitting 429s. Full spec: `plan.md`. Web UI spec:
-plan.md Section 5. UI implementation phase: plan.md Section 15 (Phase 7). Full
-internal endpoint contract: plan.md Section 17 ("Internal/UI Endpoints").
- 
-Current state: API switching/routing core works. UI is Alpine.js + Tailwind CDN,
-zero build step, served by FastAPI at `/ui`. Frontend markup and interactivity
-exist. Backend wiring behind most of it does not, or is faked.
- 
-## Non-negotiable rule: no fake values, anywhere
- 
-This is the reason this session exists. Grep for and eliminate every instance of:
- 
-- Randomized or simulated latency (`Math.random()` feeding a `latency_ms` display,
-  `setTimeout` standing in for an actual network round-trip)
-- Hardcoded or static "live" numbers (request counts, token counts, P50s, queue
-  depth, cache hits) that aren't actually read from `/internal/status` or the SSE
-  stream
-- Status badges (`HEALTHY` / `COOLING` / `OPEN`) driven by anything other than real
-  provider/key state on the backend
-- Any `[Test]` key button, `[Save & Apply]`, `[Clear cache]`, `[Reset]`, `[Export]`,
-  `[Import]`, or log stream action that resolves without an actual HTTP call to a
-  real endpoint doing real work
-Specifically for the key test flow (plan.md Section 5, Panel 1 and Section 17
-`POST /internal/config/test-key`): this must fire a genuine authenticated request
-against the actual provider API using the actual key, measure wall-clock latency
-of that real call, and return the real `latency_ms` or the real error
-(`401 Unauthorized`, timeout, etc). If this currently returns a canned number or a
-random one, that's the first thing to fix.
- 
-If you find a fake value and aren't sure whether the real data source exists yet
-on the backend, say so and build the backend piece per plan.md Section 17 — don't
-paper over it with a better-looking fake.
- 
-## Alternatives rule
- 
-When a decision isn't fully pinned down by plan.md — e.g. how to structure a
-polling fallback if SSE drops, how to debounce a staged-config yellow border,
-how to handle a provider that returns malformed model list JSON — do not silently
-pick the option you think is best and implement it. Lay out two real options with
-their tradeoffs (what each costs, what each risks) and let me pick, or say
-"defaulting to X because Y, flag if you want the other" and let me override it.
-Assume my first reaction to your first idea is "there's probably a better one" —
-default to giving me the choice rather than the single answer.
- 
-## Task 1 — Audit (read-only, do this first)
- 
-Go through `ui/static/app.js` function by function. For each named function or
-handler bound to a UI element, produce a table row:
- 
-| Function / handler | UI element it drives | Backend endpoint it should call (plan.md §17) | Currently wired to real endpoint? | Currently returns real data? | Notes |
- 
-Include every panel: Providers, Models, Dashboard, Routing, Advanced, Logs, plus
-header actions (Save & Apply, Docs link, running/status indicator) and the SSE
-consumers (`/internal/stream`, `/internal/logs/stream`).
- 
-Cross-reference each row against:
-- plan.md Section 5 (what the panel is supposed to do)
-- plan.md Section 17 (the exact endpoint contract — path, body, response shape)
-- what actually exists in `clasp/` on the backend right now
-Write this to `ui_audit.md` at the repo root. Do not touch any implementation file
-in this task.
- 
-**Stop after Task 1 and show me the audit before writing any code.** I want to see
-the real/fake breakdown and sign off on the fix order before you start changing
-things, not find out after.
- 
-## Task 2 — Fix, function by function
- 
-Once I've reviewed the audit, work through it in the order we agree on. For each
-function:
- 
-1. Confirm or build the backend endpoint per plan.md Section 17's exact contract
-   (request/response shape, status codes, error format). Don't invent a different
-   shape even if it seems cleaner — match the spec so the rest of the system that
-   depends on it doesn't break.
-2. Wire the frontend function to call it for real.
-3. Remove the fake data path entirely — don't leave it as a commented-out fallback.
-4. If the real data requires state that doesn't exist yet (e.g. actual rolling P50
-   latency per provider, actual daily request counters), implement that state
-   tracking on the backend rather than faking the number the UI displays.
-Do not drop any currently-present named function while doing this. If a function
-in the current frontend turns out to be genuinely redundant or conflicts with the
-plan.md spec, flag it as an open question in Task 3's summary — don't silently
-delete it.
- 
-## Task 3 — Verification (real, not visual)
- 
-For every function fixed, verify it end to end with the server actually running:
- 
-- Real HTTP call made (show the request/response, not just "it loaded")
-- For the dashboard/logs SSE streams: confirm events are arriving from real
-  request activity, not a timer emitting synthetic data
-- For [Test] key: run it against at least one real provider key and confirm the
-  latency number matches an independently observed round-trip, and confirm a bad
-  key produces the real error, not a fake one
-- For Save & Apply: confirm `config.yaml` on disk actually changes and the running
-  server picks up the change (hot-reload), not just that the UI shows a success
-  toast
-Write a short `ui_verification.md` — one line per function: what was tested, what
-the actual observed result was, pass/fail. If something can't be verified without
-a live provider key you don't have on hand in this session, say so explicitly
-rather than marking it passed.
- 
-## Rules for this session
- 
-- Stick to plan.md's UI spec (Section 5) and endpoint contract (Section 17). Do not
-  add panels, fields, or endpoints that aren't in plan.md without flagging it as a
-  deviation first.
-- No fake data, ever, in the final state — see the rule above. This is the primary
-  failure mode from the last pass and the whole point of this session.
-- No silent "improvements" to design or UX beyond making existing named functions
-  real. If you think something in plan.md's UI design is actually wrong, say so as
-  an open question — don't just build it differently.
-- Give me options instead of your single best guess whenever plan.md doesn't fully
-  determine the answer.
-- Don't drop working functionality while fixing broken functionality.
-- Confirm the audit with me before starting Task 2.
- 
 
+Same as before: implementing against an existing/growing codebase, not
+architecting from scratch. Cross-check every new feature against plan.md's
+actual system design before building it — if a feature needs data (model lists,
+latency history, request counts), it should come from real state the backend
+already tracks or will track for real, not a new fake layer bolted on to look
+like it matches PLANNN.md's description faster.
+
+## Non-negotiable rule: no fake values, anywhere (still applies)
+
+Same rule as the reality pass, extended to every new feature:
+
+- Tour system: fine to be static content, but "first visit" detection and
+  completion state must be real (real localStorage/backend flag), not always-on
+  or always-off regardless of state.
+- Update checker: must hit a real version source (e.g. actual GitHub
+  releases/tags for this repo) and do a real semver comparison — not a hardcoded
+  "you're up to date" or a fake "update available" banner.
+- Command palette: must call the real handlers for real actions (reuses
+  whatever Task 2 of the reality pass already wired up) — not a new decorative
+  layer that duplicates fake versions of already-real functions.
+- Vault encryption: must be real encryption (e.g. actual AES-GCM with a
+  passphrase-derived key, not base64-and-call-it-encrypted). If you're not
+  confident an approach is cryptographically sound, say so and flag it rather
+  than shipping something that only looks encrypted.
+- Priority rules engine: routing decisions it makes must actually change which
+  provider/key gets used at request time — not a UI that saves rules nobody
+  reads.
+- Usage analytics: numbers must come from real request/token counters already
+  in the system (or built for real if missing) — not randomly generated
+  "sample" data to make the dashboard look populated.
+- AI model catalog: model list and metadata must come from real provider
+  API responses (or a real static list you've actually verified against current
+  provider docs) — not invented model names/context windows/pricing.
+- Anomaly detection: must run against real historical metrics and use a stated,
+  actual threshold/method (e.g. rolling z-score on real latency data) — not a
+  hardcoded "everything is fine" or randomly firing alert.
+- Dark/light mode: this one's legitimately just CSS variables + a toggle, no
+  fake-data risk here. Lowest priority, do it last, don't overthink it.
+
+## Alternatives rule (still applies)
+
+Same as before. Specifically flag these decisions rather than picking silently:
+
+- Whether team/multi-user collaboration is even worth building — this is a
+  single-operator local proxy tool as far as I've described it to you. Ask
+  before building shared-vault/role/permission infrastructure for a tool with
+  one user, rather than assuming PLANNN.md's feature list applies wholesale.
+- Which encryption library/approach for the vault (tradeoffs: browser
+  WebCrypto vs a backend-side encrypted-at-rest file vs OS keychain integration)
+- What anomaly detection method to use (simple threshold vs rolling stats vs
+  something heavier) — give options with actual false-positive/complexity
+  tradeoffs, don't just pick one.
+- Whether the model catalog needs to be curated/static or live-fetched per
+  provider — tradeoffs are staleness vs API calls on every page load.
+
+## Phase 0 — Reality pass (prerequisite, do this first if not already done)
+
+Unchanged from the prior session:
+1. Audit `ui/static/app.js` function by function → `ui_audit.md`. Stop for
+   sign-off.
+2. Fix function by function against plan.md Section 5 / Section 17, no fake
+   data left anywhere, nothing dropped.
+3. Verify every fix live → `ui_verification.md`.
+
+Do not proceed to Phase 1 until `ui_verification.md` shows everything in scope
+passing or explicitly and honestly marked as unverifiable (e.g. no live key
+available), not silently marked passed.
+
+## Phase 1 — Quick wins (only after Phase 0 verified)
+
+Priority order for a solo daily-use tool (re-ordered from PLANNN.md's Phase 1,
+same three features):
+
+1. **Command palette** — highest actual value for you personally since you're
+   the power user here. Wire to real existing actions only.
+2. **Tour system** — lower priority for a single-user tool you built yourself,
+   but cheap and harmless. Keep it simple; real completion-state tracking only.
+3. **Update checker** — only meaningful once this is something you're
+   distributing/reinstalling across machines. Confirm this is actually useful
+   to you before building it — flag as open question if unclear.
+
+## Phase 2 — Security (only after Phase 1)
+
+1. **Vault encryption** — real encryption per the alternatives rule above.
+   This is the one place in PLANNN.md's roadmap where getting it wrong has real
+   consequences (leaked API keys), so err toward the simpler, well-reviewed
+   approach over a custom scheme.
+2. **Priority rules engine** — must actually affect routing decisions in
+   `clasp/`'s real routing logic per plan.md, not just a UI-only preference
+   store.
+3. **Team collaboration** — flagged above as open question. Do not build unless
+   confirmed needed.
+
+## Phase 3 — Analytics & polish (only after Phase 2)
+
+1. **Usage analytics dashboard** — real counters only.
+2. **AI model catalog** — real provider data only.
+3. **Anomaly detection** — real thresholds on real data, stated method.
+4. **Dark/light mode** — CSS variables, last, lowest risk.
+
+## Rules for this session (still applies, extended)
+
+- No fake data, ever, in any phase — the primary failure mode this whole
+  project is being run to eliminate.
+- Don't treat PLANNN.md's self-reported "current state" or success metrics as
+  real — they're not verified and mostly don't apply to a solo project.
+- Flag team-collaboration and update-checker as "confirm this is actually
+  needed" before building, don't build by default just because it's in the doc.
+- Give options instead of a single best guess wherever the approach isn't fully
+  determined (encryption method, anomaly detection method, catalog freshness).
+- Don't drop working functionality while adding new functionality.
+- Each phase gets its own audit-or-verification step before moving to the next
+  phase — don't chain straight through all ten features without a checkpoint.

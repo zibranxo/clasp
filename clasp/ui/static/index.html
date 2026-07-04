@@ -172,7 +172,7 @@
 </head>
 <body class="font-body">
   <!-- Exact KeyKing Replica Structure -->
-  <div x-data="claspApp()" x-init="init()" x-cloak>
+  <div x-data="Alpine.store('app')" x-init="init()" x-cloak>
     <!-- App Structure Will Be Built Here -->
 
     <div class="flex">
@@ -268,13 +268,411 @@
               </template>
             </div>
           </div>
+
+          <!-- Vault Panel -->
+          <div x-show="panel === 'vault'">
+            <div class="mb-8">
+              <h1 class="font-display font-black uppercase text-4xl mb-2 tracking-tighter">Vault Encryption</h1>
+              <p class="text-neo-dark/80 font-bold text-sm">Secure your API keys with end-to-end encryption.</p>
+            </div>
+
+            <!-- Vault Status -->
+            <div class="neo-card p-6 mb-6">
+              <div class="mb-4">
+                <h2 class="font-display font-bold uppercase text-lg mb-3">Vault Status</h2>
+
+                <div class="flex items-center gap-4 mb-4">
+                  <span class="font-display font-bold">Encryption:</span>
+                  <span class="neo-badge"
+                        :class="vault.isEnabled ? 'neo-badge-healthy' : 'neo-badge-off'"
+                        x-text="vault.isEnabled ? 'ENABLED' : 'DISABLED'"></span>
+                </div>
+
+                <div class="flex items-center gap-4 mb-4">
+                  <span class="font-display font-bold">Access:</span>
+                  <span class="neo-badge"
+                        :class="vault.isUnlocked ? 'neo-badge-healthy' : 'neo-badge-off'"
+                        x-text="vault.isUnlocked ? 'UNLOCKED' : 'LOCKED'"></span>
+                </div>
+
+                <div x-show="!vault.isEnabled" class="mt-6">
+                  <button class="neo-button neo-button-success" @click="showEnableVaultModal = true">
+                    Enable Vault Encryption
+                  </button>
+                </div>
+
+                <div x-show="vault.isEnabled && !vault.isUnlocked" class="mt-6">
+                  <button class="neo-button neo-button-info" @click="showUnlockVaultModal = true">
+                    Unlock Vault
+                  </button>
+                </div>
+
+                <div x-show="vault.isEnabled && vault.isUnlocked" class="mt-6 flex gap-3">
+                  <button class="neo-button neo-button-danger" @click="lockVault()">
+                    Lock Vault
+                  </button>
+                  <button class="neo-button neo-button-warning" @click="showDisableVaultModal = true">
+                    Disable Encryption
+                  </button>
+                </div>
+              </div>
+
+              <!-- Security Information -->
+              <div x-show="vault.isEnabled && vault.isUnlocked" class="mt-8 pt-4 border-t-3 border-neo-dark">
+                <h3 class="font-display font-bold uppercase mb-3">Security Information</h3>
+                <div class="space-y-3 text-sm">
+                  <div class="flex justify-between">
+                    <span class="font-display font-bold">Encryption Algorithm:</span>
+                    <span>AES-256-GCM</span>
+                  </div>
+                  <div class="flex justify-between">
+                    <span class="font-display font-bold">Key Derivation:</span>
+                    <span>PBKDF2 with 100,000 iterations</span>
+                  </div>
+                  <div class="flex justify-between">
+                    <span class="font-display font-bold">Hash Function:</span>
+                    <span>SHA-256</span>
+                  </div>
+                  <div class="flex justify-between">
+                    <span class="font-display font-bold">Last Encrypted:</span>
+                    <span x-text="vault.encryptedConfig ? new Date(vault.encryptedConfig.timestamp).toLocaleString() : 'Never'"></span>
+                  </div>
+                </div>
+              </div>
+
+              <!-- Backup & Export -->
+              <div x-show="vault.isEnabled && vault.isUnlocked" class="mt-8 pt-4 border-t-3 border-neo-dark">
+                <h3 class="font-display font-bold uppercase mb-3">Backup & Recovery</h3>
+                <div class="space-y-3">
+                  <button class="neo-button w-full justify-start" @click="exportEncryptedBackup()">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="mr-2">
+                      <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+                      <polyline points="7,10 12,15 17,10"></polyline>
+                      <line x1="12" y1="15" x2="12" y2="3"></line>
+                    </svg>
+                    Export Encrypted Backup
+                  </button>
+                  <button class="neo-button w-full justify-start" @click="showImportBackupModal = true">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="mr-2">
+                      <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+                      <polyline points="17,8 12,3 7,8"></polyline>
+                      <line x1="12" y1="3" x2="12" y2="15"></line>
+                    </svg>
+                    Import Encrypted Backup
+                  </button>
+                </div>
+              </div>
+
+              <!-- Security Tips -->
+              <div class="mt-8 neo-card p-4 bg-neo-yellow">
+                <h4 class="font-display font-bold uppercase mb-2">Security Tips</h4>
+                <ul class="text-sm space-y-1">
+                  <li>• Store your passphrase in a secure password manager</li>
+                  <li>• Never share your passphrase with anyone</li>
+                  <li>• Export encrypted backups regularly</li>
+                  <li>• If you lose your passphrase, your data cannot be recovered</li>
+                </ul>
+              </div>
+            </div>
+          </div>
         </div>
       </main>
     </div>
   </div>
 
+  <!-- File import input (hidden) -->
+  <input type="file" id="config-import-input" accept=".yaml,.yml" style="display: none"
+         @change="importConfig($event)">
+
+  <!-- Vault Enable Modal -->
+  <div x-show="showEnableVaultModal" class="fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-50 backdrop-blur-sm" x-cloak>
+    <div class="neo-card w-full max-w-md mx-4" @click.away="showEnableVaultModal = false">
+      <div class="p-6 border-b-3 border-neo-dark">
+        <h2 class="font-display font-black uppercase text-2xl mb-1">Enable Vault Encryption</h2>
+        <p class="text-neo-dark/80 text-sm">Secure all your API keys with end-to-end encryption.</p>
+      </div>
+
+      <div class="p-6">
+        <div class="mb-4">
+          <label class="block font-display font-bold text-sm uppercase mb-2">Create Passphrase</label>
+          <input type="password" x-model="enableVaultPassphrase"
+                 class="neo-input mb-2" placeholder="Enter strong passphrase">
+          <div class="text-xs text-neo-dark/70">
+            <span x-show="enableVaultPassphrase && enableVaultPassphrase.length < 8" class="text-neo-pink">
+              Passphrase must be at least 8 characters
+            </span>
+            <span x-show="enableVaultPassphrase && enableVaultPassphrase.length >= 8" class="text-neo-green">
+              Strong passphrase
+            </span>
+          </div>
+        </div>
+
+        <div class="mb-6">
+          <label class="block font-display font-bold text-sm uppercase mb-2">Confirm Passphrase</label>
+          <input type="password" x-model="enableVaultConfirm"
+                 class="neo-input" placeholder="Confirm passphrase">
+          <div class="text-xs text-neo-dark/70 mt-1">
+            <span x-show="enableVaultConfirm && enableVaultPassphrase !== enableVaultConfirm" class="text-neo-pink">
+              Passphrases do not match
+            </span>
+            <span x-show="enableVaultConfirm && enableVaultPassphrase === enableVaultConfirm" class="text-neo-green">
+              Passphrases match
+            </span>
+          </div>
+        </div>
+
+        <div class="flex gap-3">
+          <button class="neo-button neo-button-success flex-1"
+                  @click="enableVault(enableVaultPassphrase)"
+                  :disabled="!enableVaultPassphrase || enableVaultPassphrase.length < 8 || enableVaultPassphrase !== enableVaultConfirm">
+            Enable Encryption
+          </button>
+          <button class="neo-button flex-1" @click="showEnableVaultModal = false">
+            Cancel
+          </button>
+        </div>
+
+        <div class="mt-4 p-3 bg-neo-yellow text-xs">
+          <strong>IMPORTANT:</strong> Store your passphrase securely. If you lose it, your data cannot be recovered!
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Vault Unlock Modal -->
+  <div x-show="showUnlockVaultModal" class="fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-50 backdrop-blur-sm" x-cloak>
+    <div class="neo-card w-full max-w-md mx-4" @click.away="showUnlockVaultModal = false">
+      <div class="p-6 border-b-3 border-neo-dark">
+        <h2 class="font-display font-black uppercase text-2xl mb-1">Unlock Vault</h2>
+        <p class="text-neo-dark/80 text-sm">Enter your passphrase to access encrypted data.</p>
+      </div>
+
+      <div class="p-6">
+        <div class="mb-6">
+          <label class="block font-display font-bold text-sm uppercase mb-2">Passphrase</label>
+          <input type="password" x-model="unlockVaultPassphrase"
+                 class="neo-input" placeholder="Enter your passphrase" @keydown.enter="unlockVault(unlockVaultPassphrase)">
+        </div>
+
+        <div class="flex gap-3">
+          <button class="neo-button neo-button-info flex-1"
+                  @click="unlockVault(unlockVaultPassphrase)"
+                  :disabled="!unlockVaultPassphrase || unlockVaultPassphrase.length < 8">
+            Unlock Vault
+          </button>
+          <button class="neo-button flex-1" @click="showUnlockVaultModal = false">
+            Cancel
+          </button>
+        </div>
+
+        <div class="mt-4 text-center">
+          <button class="text-xs text-neo-dark/60 hover:text-neo-dark" @click="showForgotPassphrase = true">
+            Forgot passphrase?
+          </button>
+        </div>
+
+        <div x-show="showForgotPassphrase" class="mt-3 p-2 bg-neo-pink/20 text-xs text-neo-dark">
+          Without your passphrase, your encrypted data cannot be recovered. If you have an encrypted backup, you can try importing it.
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Vault Disable Modal -->
+  <div x-show="showDisableVaultModal" class="fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-50 backdrop-blur-sm" x-cloak>
+    <div class="neo-card w-full max-w-md mx-4" @click.away="showDisableVaultModal = false">
+      <div class="p-6 border-b-3 border-neo-dark">
+        <h2 class="font-display font-black uppercase text-2xl mb-1 text-neo-pink">Disable Vault Encryption</h2>
+        <p class="text-neo-dark/80 text-sm">This will decrypt your config and store it in plaintext.</p>
+      </div>
+
+      <div class="p-6">
+        <div class="mb-6">
+          <label class="block font-display font-bold text-sm uppercase mb-2">Confirm Passphrase</label>
+          <input type="password" x-model="disableVaultPassphrase"
+                 class="neo-input" placeholder="Enter passphrase to confirm">
+        </div>
+
+        <div class="mb-4 p-3 bg-neo-pink/20 text-xs text-neo-dark rounded">
+          <strong>WARNING:</strong> Disabling encryption will store your API keys in plaintext. Only do this if you understand the security risks.
+        </div>
+
+        <div class="flex gap-3">
+          <button class="neo-button neo-button-danger flex-1"
+                  @click="disableVault()"
+                  :disabled="!disableVaultPassphrase || disableVaultPassphrase.length < 8">
+            Disable Encryption
+          </button>
+          <button class="neo-button flex-1" @click="showDisableVaultModal = false">
+            Cancel
+          </button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Import Backup Modal -->
+  <div x-show="showImportBackupModal" class="fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-50 backdrop-blur-sm" x-cloak>
+    <div class="neo-card w-full max-w-md mx-4" @click.away="showImportBackupModal = false">
+      <div class="p-6 border-b-3 border-neo-dark">
+        <h2 class="font-display font-black uppercase text-2xl mb-1">Import Encrypted Backup</h2>
+        <p class="text-neo-dark/80 text-sm">Restore from an encrypted backup file.</p>
+      </div>
+
+      <div class="p-6">
+        <div class="mb-4">
+          <label class="block font-display font-bold text-sm uppercase mb-2">Backup File</label>
+          <input type="file" accept=".json" @change="importBackupFile = $event.target.files[0]"
+                 class="neo-input p-2">
+        </div>
+
+        <div class="mb-6">
+          <label class="block font-display font-bold text-sm uppercase mb-2">Passphrase</label>
+          <input type="password" x-model="importBackupPassphrase"
+                 class="neo-input" placeholder="Enter backup passphrase">
+        </div>
+
+        <div class="flex gap-3">
+          <button class="neo-button neo-button-info flex-1"
+                  @click="importEncryptedBackup(importBackupFile, importBackupPassphrase)"
+                  :disabled="!importBackupFile || !importBackupPassphrase || importBackupPassphrase.length < 8">
+            Import Backup
+          </button>
+          <button class="neo-button flex-1" @click="showImportBackupModal = false">
+            Cancel
+          </button>
+        </div>
+
+        <div class="mt-4 p-3 bg-neo-yellow text-xs">
+          <strong>NOTE:</strong> Importing a backup will replace your current configuration.
+        </div>
+      </div>
+    </div>
+  </div>
+
   <!-- Alpine.js -->
   <script src="https://cdn.jsdelivr.net/npm/alpinejs@3/dist/cdn.min.js" defer></script>
-  <script src="/ui/assets/app_exact_replica.js"></script>
+  <script src="/ui/assets/app.js"></script>
+  <script>
+    document.addEventListener('DOMContentLoaded', () => {
+      // Initialize Alpine store
+      document.addEventListener('alpine:init', () => {
+        Alpine.store('app', claspApp());
+      });
+    });
+  </script>
+
+  <!-- Command Palette Modal -->
+  <div x-data="Alpine.store('app')" x-show="commandPalette.open" @keydown.escape="closeCommandPalette()"
+       class="fixed inset-0 z-50 flex items-start pt-20 bg-black bg-opacity-50 backdrop-blur-sm"
+       x-cloak>
+    <div class="w-full max-w-2xl mx-auto" @click.away="closeCommandPalette()">
+      <div class="neo-card mx-4">
+        <div class="p-4 border-b-3 border-neo-dark">
+          <div class="flex items-center gap-3">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
+              <polyline points="14 2 14 8 20 8"></polyline>
+              <line x1="16" y1="13" x2="8" y2="13"></line>
+              <line x1="16" y1="17" x2="8" y2="17"></line>
+              <polyline points="10 9 9 9 8 9"></polyline>
+            </svg>
+            <input type="text" x-ref="commandInput" x-model="commandPalette.query"
+                   @input.debounce.150ms="filterCommands()"
+                   placeholder="Type a command or search..."
+                   class="flex-1 neo-input font-display font-bold text-lg"
+                   @keydown.up.prevent="navigateCommands('up')"
+                   @keydown.down.prevent="navigateCommands('down')"
+                   @keydown.enter.prevent="executeCommand()">
+          </div>
+        </div>
+
+        <div class="max-h-96 overflow-y-auto">
+          <!-- Favorites Section -->
+          <div x-show="getFavorites().length > 0" class="p-4 border-b border-neo-gray">
+            <h3 class="font-display font-bold text-sm uppercase text-neo-dark/70 mb-2">Favorites</h3>
+            <div class="space-y-1">
+              <template x-for="cmd in getFavorites()" :key="cmd.id">
+                <div class="flex items-center gap-3 p-2 rounded cursor-pointer hover:bg-neo-gray/50"
+                     :class="{ 'bg-neo-yellow/50': commandPalette.filteredCommands.indexOf(cmd) === commandPalette.selectedIndex }"
+                     @click="commandPalette.selectedIndex = commandPalette.filteredCommands.indexOf(cmd); executeCommand()">
+                  <span class="font-display font-bold" x-text="cmd.name"></span>
+                  <span class="text-xs text-neo-dark/60 flex-1" x-text="cmd.description"></span>
+                  <span class="text-xs neo-badge" x-text="cmd.category"></span>
+                </div>
+              </template>
+            </div>
+          </div>
+
+          <!-- History Section -->
+          <div x-show="commandPalette.history.length > 0 && getFavorites().length === 0" class="p-4 border-b border-neo-gray">
+            <h3 class="font-display font-bold text-sm uppercase text-neo-dark/70 mb-2">History</h3>
+            <div class="space-y-1">
+              <template x-for="item in commandPalette.history.slice().reverse()" :key="item.id">
+                <div class="flex items-center gap-3 p-2 rounded cursor-pointer hover:bg-neo-gray/50">
+                  <span class="font-display font-bold" x-text="commands.find(c => c.id === item.id)?.name"></span>
+                  <span class="text-xs text-neo-dark/60" x-text="new Date(item.timestamp).toLocaleTimeString()"></span>
+                </div>
+              </template>
+            </div>
+          </div>
+
+          <!-- All Commands Section -->
+          <div x-show="commandPalette.filteredCommands.length > 0" class="p-4">
+            <h3 class="font-display font-bold text-sm uppercase text-neo-dark/70 mb-2">Commands</h3>
+            <div x-ref="commandList" class="space-y-1">
+              <template x-for="(cmd, index) in commandPalette.filteredCommands" :key="cmd.id">
+                <div class="flex items-center gap-3 p-2 rounded cursor-pointer"
+                     :class="{
+                       'bg-neo-yellow/50 selected': index === commandPalette.selectedIndex,
+                       'hover:bg-neo-gray/50': index !== commandPalette.selectedIndex
+                     }"
+                     @click="commandPalette.selectedIndex = index; executeCommand()">
+                  <span class="font-display font-bold" x-text="cmd.name"></span>
+                  <span class="text-xs text-neo-dark/60 flex-1" x-text="cmd.description"></span>
+                  <span class="text-xs neo-badge" x-text="cmd.category"></span>
+                  <button @click.stop="toggleFavorite(cmd.id)" class="text-sm">
+                    <span x-text="isFavorite(cmd.id) ? '★' : '☆'"></span>
+                  </button>
+                </div>
+              </template>
+            </div>
+          </div>
+
+          <!-- No Results -->
+          <div x-show="commandPalette.filteredCommands.length === 0 && commandPalette.query" class="p-8 text-center">
+            <p class="text-neo-dark/60 font-display font-bold">No commands found for "<span x-text="commandPalette.query"></span>"</p>
+            <p class="text-xs text-neo-dark/40 mt-2">Try a different search term</p>
+          </div>
+
+          <!-- Help Section -->
+          <div x-show="!commandPalette.query && getFavorites().length === 0 && commandPalette.history.length === 0" class="p-8 text-center">
+            <h3 class="font-display font-bold text-lg mb-2">Command Palette</h3>
+            <p class="text-neo-dark/60 text-sm mb-4">Quickly access any action with keyboard shortcuts</p>
+            <div class="flex justify-center gap-4 text-xs">
+              <kbd class="neo-badge">⌘K</kbd>
+              <kbd class="neo-badge">Ctrl+K</kbd>
+              <span class="text-neo-dark/40">to open</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="p-3 border-t-3 border-neo-dark flex justify-between items-center text-xs font-display font-bold">
+          <div class="flex items-center gap-2">
+            <kbd class="neo-badge">↑↓</kbd>
+            <span>Navigate</span>
+          </div>
+          <div class="flex items-center gap-2">
+            <kbd class="neo-badge">↩</kbd>
+            <span>Select</span>
+          </div>
+          <div class="flex items-center gap-2">
+            <kbd class="neo-badge">ESC</kbd>
+            <span>Close</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
 </body>
 </html>
